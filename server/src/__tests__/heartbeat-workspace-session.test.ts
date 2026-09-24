@@ -491,6 +491,53 @@ describe("assertGitSensitiveAdapterWorkspaceValid", () => {
     );
   });
 
+  it("requires git metadata for a non_git_path workspace whose persisted strategy is a git worktree", async () => {
+    const input = buildWorkspaceValidationInput();
+    const cwd = "/tmp/paperclip-non-git-path-persisted-worktree-without-git-metadata";
+
+    await expectWorkspaceValidationFailure(
+      buildWorkspaceValidationInput({
+        resolvedWorkspace: buildResolvedWorkspace({ cwd, sourceType: "non_git_path" }),
+        executionWorkspace: {
+          ...input.executionWorkspace,
+          baseCwd: cwd,
+          cwd,
+        },
+        persistedExecutionWorkspace: {
+          ...input.persistedExecutionWorkspace!,
+          strategyType: "git_worktree",
+          cwd,
+          providerType: "git_worktree",
+          providerRef: cwd,
+        },
+      }),
+      "missing_git_metadata",
+      "has no .git metadata",
+    );
+  });
+
+  it("points a local_path workspace without git metadata at the non_git_path source type", async () => {
+    const input = buildWorkspaceValidationInput();
+    const cwd = "/tmp/paperclip-local-path-without-git-metadata";
+
+    await expectWorkspaceValidationFailure(
+      buildWorkspaceValidationInput({
+        resolvedWorkspace: buildResolvedWorkspace({ cwd, sourceType: "local_path" }),
+        executionWorkspace: {
+          ...input.executionWorkspace,
+          baseCwd: cwd,
+          cwd,
+        },
+        persistedExecutionWorkspace: {
+          ...input.persistedExecutionWorkspace!,
+          cwd,
+        },
+      }),
+      "missing_git_metadata",
+      'set the project workspace source type to "non_git_path"',
+    );
+  });
+
   it("does not apply the git-sensitive workspace guard to non-local execution targets", async () => {
     const input = buildWorkspaceValidationInput();
 

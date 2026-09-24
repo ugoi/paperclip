@@ -3229,9 +3229,14 @@ export async function assertGitSensitiveAdapterWorkspaceValid(input: {
     !intentionallyNonGitWorkspace &&
     !(await hasGitMetadata(effectiveCwd))
   ) {
+    // A local_path workspace on a plain folder is the common way to hit this. Point at the
+    // declared non-git source type instead of leaving `git init` as the only visible fix.
+    const nonGitHint = input.resolvedWorkspace.sourceType === "local_path"
+      ? ' If this folder is not meant to be a git repository, set the project workspace source type to "non_git_path" (Local non-git path).'
+      : "";
     fail(
       "missing_git_metadata",
-      `Issue ${issue.identifier ?? issue.id} expected a git workspace for ${input.adapterType}, but "${effectiveCwd}" has no .git metadata.`,
+      `Issue ${issue.identifier ?? issue.id} expected a git workspace for ${input.adapterType}, but "${effectiveCwd}" has no .git metadata.${nonGitHint}`,
     );
   }
 
