@@ -9,6 +9,7 @@ import {
   resolveGitHubRef,
   resolveGitInstallRequest,
   resolveGitInstallWorkspacePackages,
+  resolveGitBundledDependencyVersions,
   resolveNpmInstallRequest,
   runCommandWithDiagnostics,
 } from "../commands/install.js";
@@ -219,6 +220,19 @@ describe("managed install commands", () => {
     };
     await installGitPayload("paperclipai/paperclip", sha, runCommand, resolveInstallStorePaths());
     expect(inspectedPackages).toBe(1);
+  });
+
+  it("uses actual git workspace versions when bundled packages have different versions", () => {
+    const source = { version: "0.3.1", dependencies: { sdk: "workspace:*", shared: "workspace:^", external: "^5.0.0" }, optionalDependencies: { optional: "workspace:~" }, peerDependencies: { sdk: "workspace:*" } };
+    const prepared = { version: "0.3.1", dependencies: { sdk: "0.3.1", shared: "^0.3.1", external: "^5.0.0" } };
+    expect(resolveGitBundledDependencyVersions(prepared, source, new Map([["sdk", "1.0.0"], ["shared", "0.3.1"], ["optional", "2.0.0"]]))).toEqual({
+      version: "0.3.1",
+      dependencies: { sdk: "1.0.0", shared: "^0.3.1", external: "^5.0.0" },
+      optionalDependencies: { optional: "~2.0.0" },
+      peerDependencies: { sdk: "1.0.0" },
+    });
+    expect(prepared.dependencies.sdk).toBe("0.3.1");
+    expect(() => resolveGitBundledDependencyVersions(prepared, source, new Map())).toThrow("Missing git workspace package version for sdk");
   });
 
   it("resolves the complete server workspace dependency closure in dependency order", () => {

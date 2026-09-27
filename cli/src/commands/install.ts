@@ -37,6 +37,34 @@ export type CommandRunner = (
 
 type ReleasePackageEntry = { dir: string; name: string };
 
+type GitPackageManifest = {
+  version: string;
+  dependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  bundleDependencies?: string[];
+  bundledDependencies?: string[];
+};
+
+export function resolveGitBundledDependencyVersions(
+  prepared: GitPackageManifest,
+  source: GitPackageManifest,
+  versions: ReadonlyMap<string, string>,
+): GitPackageManifest {
+  const result = structuredClone(prepared);
+  for (const section of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
+    for (const [name, specifier] of Object.entries(source[section] ?? {})) {
+      if (!specifier.startsWith("workspace:")) continue;
+      const version = versions.get(name);
+      if (!version) throw new Error(`Missing git workspace package version for ${name}.`);
+      const range = specifier.slice("workspace:".length);
+      const prefix = range === "^" || range === "~" ? range : "";
+      (result[section] ??= {})[name] = `${prefix}${version}`;
+    }
+  }
+  return result;
+}
+
 export async function runCommandWithDiagnostics(
   file: string,
   args: string[],
@@ -286,13 +314,23 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     }
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
     const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);
+    const workspaceVersions = new Map(workspacePackages.map((entry) => {
+      const pkg = JSON.parse(fs.readFileSync(path.join(checkoutPath, entry.dir, "package.json"), "utf8")) as GitPackageManifest;
+      return [entry.name, pkg.version] as const;
+    }));
     for (const [index, workspacePackage] of workspacePackages.entries()) {
       const packageDir = path.join(checkoutPath, workspacePackage.dir);
-      const packageJson = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")) as { bundleDependencies?: string[]; bundledDependencies?: string[] };
+      const packageJson = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")) as GitPackageManifest;
       const bundledDependencies = packageJson.bundleDependencies ?? packageJson.bundledDependencies ?? [];
       if (bundledDependencies.length > 0) {
         const stagedPackage = path.join(stagingRoot, `workspace-package-${index}`);
         await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "prepare-bundled-package.mjs"), packageDir, stagedPackage], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
+        // Release builds synchronize versions; source checkouts can contain
+        // different versions (for example plugin-sdk). Use the actual packages
+        // being installed, not the consuming package's version.
+        const preparedPath = path.join(stagedPackage, "package.json");
+        const prepared = JSON.parse(fs.readFileSync(preparedPath, "utf8")) as GitPackageManifest;
+        fs.writeFileSync(preparedPath, `${JSON.stringify(resolveGitBundledDependencyVersions(prepared, packageJson, workspaceVersions), null, 2)}\n`);
         await runCommand("npm", ["pack", stagedPackage, "--ignore-scripts", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
       } else {
         await runCommand("corepack", ["pnpm", "--dir", workspacePackage.dir, "pack", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv({ PAPERCLIP_RELEASE_REUSE_UI_DIST: "1" }), maxBuffer: 32 * 1024 * 1024 });
