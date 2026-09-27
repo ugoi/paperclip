@@ -146,6 +146,11 @@ describe("managed install commands", () => {
         return { stdout: "", stderr: "" };
       }
       if (file === "npm" && args[0] === "pack") {
+        if (args[1]?.includes("workspace-package-")) {
+          // These packages already contain built assets; their prepack scripts
+          // reference the original checkout and cannot run in the staging dir.
+          expect(args).toContain("--ignore-scripts");
+        }
         const packageName = args[1]?.includes("workspace-package-") ? "paperclipai-db" : "paperclipai";
         fs.writeFileSync(path.join(args[args.indexOf("--pack-destination") + 1], `${packageName}-0.3.1.tgz`), "package");
         return { stdout: "", stderr: "" };
