@@ -119,6 +119,8 @@ describe("managed install commands", () => {
         fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
         fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ version: "0.3.1" }));
         fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
+        fs.mkdirSync(path.join(checkout, "skills", "paperclip"), { recursive: true });
+        fs.writeFileSync(path.join(checkout, "skills", "paperclip", "SKILL.md"), "runtime skill\n");
         fs.writeFileSync(path.join(checkout, "scripts", "release-package-manifest.json"), JSON.stringify(packages.map(({ dir, name }) => ({ dir, name }))));
         for (const workspacePackage of packages) {
           fs.mkdirSync(path.join(checkout, workspacePackage.dir), { recursive: true });
@@ -135,7 +137,14 @@ describe("managed install commands", () => {
         }
         return { stdout: "", stderr: "" };
       }
-      if (file === "bash") return { stdout: "", stderr: "" };
+      if (file === "bash") {
+        if (args[0] === "scripts/prepare-server-ui-dist.sh") {
+          const uiDist = path.join(String(_options!.cwd), "server", "ui-dist");
+          fs.mkdirSync(uiDist, { recursive: true });
+          fs.writeFileSync(path.join(uiDist, "index.html"), "<html>board</html>");
+        }
+        return { stdout: "", stderr: "" };
+      }
       if (file === "npm" && args[0] === "pack") {
         const packageName = args[1]?.includes("workspace-package-") ? "paperclipai-db" : "paperclipai";
         fs.writeFileSync(path.join(args[args.indexOf("--pack-destination") + 1], `${packageName}-0.3.1.tgz`), "package");
@@ -178,7 +187,7 @@ describe("managed install commands", () => {
       file === "corepack" ||
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
-    expect(buildCalls).toHaveLength(9);
+    expect(buildCalls).toHaveLength(10);
     for (const call of buildCalls) {
       const env = call[2]?.env;
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();
@@ -186,6 +195,25 @@ describe("managed install commands", () => {
     }
     const uiPackCall = buildCalls.find(([file, , options]) => file === "corepack" && options?.env?.PAPERCLIP_RELEASE_REUSE_UI_DIST === "1");
     expect(uiPackCall).toBeDefined();
+  });
+
+  it("prepares board UI and runtime skills before packaging a git install", async () => {
+    const sha = "e".repeat(40);
+    const checkoutRunner = createGitCheckoutRunCommand(sha);
+    let inspectedPackages = 0;
+    const runCommand: CommandRunner = async (file, args, options) => {
+      if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")) {
+        const checkout = String(options!.cwd);
+        expect(fs.readFileSync(path.join(checkout, "server/ui-dist/index.html"), "utf8")).toBe("<html>board</html>");
+        for (const packageDir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+          expect(fs.readFileSync(path.join(checkout, packageDir, "skills/paperclip/SKILL.md"), "utf8")).toBe("runtime skill\n");
+        }
+        inspectedPackages++;
+      }
+      return checkoutRunner(file, args, options);
+    };
+    await installGitPayload("paperclipai/paperclip", sha, runCommand, resolveInstallStorePaths());
+    expect(inspectedPackages).toBe(1);
   });
 
   it("resolves the complete server workspace dependency closure in dependency order", () => {
