@@ -1378,7 +1378,7 @@ export function NewIssueDialog() {
         aria-describedby={undefined}
         style={dialogViewportStyle}
         className={cn(
-          "flex h-(--new-issue-dialog-height) max-h-(--new-issue-dialog-height) flex-col gap-0 overflow-hidden p-0 sm:h-auto",
+          "flex h-(--new-issue-dialog-height) max-h-(--new-issue-dialog-height) flex-col gap-0 overflow-y-auto overscroll-contain p-0 max-sm:block sm:h-auto sm:overflow-hidden",
           expanded
             ? "sm:max-w-2xl sm:h-(--new-issue-dialog-height)"
             : "sm:max-w-lg"
@@ -1474,7 +1474,7 @@ export function NewIssueDialog() {
           </div>
         </div>
 
-        <div ref={dialogBodyRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <div ref={dialogBodyRef} className="sm:min-h-0 sm:flex-1 sm:overflow-y-auto sm:overscroll-contain">
           {/* Title */}
           <div className="px-4 pt-4 pb-2">
             <IssueTitleTextarea

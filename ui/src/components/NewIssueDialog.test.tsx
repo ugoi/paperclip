@@ -1276,25 +1276,23 @@ describe("NewIssueDialog", () => {
     act(() => root.unmount());
   });
 
-  it("keeps the mobile dialog bounded with an internal flexible scroll region", async () => {
+  it("keeps fields and actions in the same mobile scroll region with a separate desktop body", async () => {
     const { root } = renderDialog(container);
     await flush();
 
     const dialogContent = Array.from(container.querySelectorAll("div")).find((element) =>
       typeof element.className === "string" && element.className.includes("max-h-(--new-issue-dialog-height)"),
     );
-    expect(dialogContent?.className).toContain("h-(--new-issue-dialog-height)");
-    expect(dialogContent?.className).toContain("overflow-hidden");
-
+    expect(dialogContent?.className).toContain("overflow-y-auto");
+    expect(dialogContent?.className).toContain("max-sm:block");
+    expect(dialogContent?.className).toContain("sm:overflow-hidden");
     const titleInput = container.querySelector('textarea[placeholder="Task title (optional)"]');
     const descriptionInput = container.querySelector('textarea[aria-label="Add description..."]');
-    const bodyScrollRegion = Array.from(container.querySelectorAll("div")).find((element) =>
-      typeof element.className === "string" && element.className.includes("overscroll-contain"),
-    );
-    expect(bodyScrollRegion?.className).toContain("flex-1");
-    expect(bodyScrollRegion?.className).toContain("overflow-y-auto");
-    expect(bodyScrollRegion?.contains(titleInput ?? null)).toBe(true);
-    expect(bodyScrollRegion?.contains(descriptionInput ?? null)).toBe(true);
+    const submit = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Create Task");
+    expect(dialogContent?.contains(titleInput ?? null)).toBe(true);
+    expect(dialogContent?.contains(descriptionInput ?? null)).toBe(true);
+    expect(dialogContent?.contains(submit ?? null)).toBe(true);
+    expect(descriptionInput?.closest(".sm\\:flex-1")?.contains(submit ?? null)).toBe(false);
 
     act(() => root.unmount());
   });

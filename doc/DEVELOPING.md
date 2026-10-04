@@ -157,6 +157,15 @@ to verify native touch scrolling and selection in both assignee and model lists.
 The test uses a fixed model catalog and a reduced viewport to cover limited
 space while the phone keyboard is open; it does not require a provider login.
 
+Run `pnpm exec playwright test --config tests/e2e/playwright.config.ts tests/e2e/mobile-keyboard-viewport.spec.ts`
+for composer list bounds and new-task field/action reachability. This test
+shrinks `visualViewport.height` while retaining the layout viewport height.
+The mobile new-task dialog scrolls as one document; desktop keeps the separate
+body scroll area. Also test with a real Android keyboard: a mocked viewport
+cannot validate keyboard pixels, browser panning, or the native resize sequence.
+The mobile composer dock uses an opaque background without backdrop blur to
+avoid a disappearing composited layer during Android keyboard panning.
+
 The Storybook visual regression suite uses external PNG baselines instead of
 committed screenshots:
 
