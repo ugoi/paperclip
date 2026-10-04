@@ -9,8 +9,9 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Popover, PopoverTrigger } from "@/components/ui/popover";
 import { fuzzyTextMatchesQuery, normalizeSearchText, scoreFuzzyTextFields } from "@/lib/searchable-select";
+import { MobileEntityPickerContent } from "@/components/MobileEntityPickerContent";
 import { cn } from "@/lib/utils";
 
 export interface SearchableSelectOption<TValue extends string = string> {
@@ -224,8 +225,7 @@ export function SearchableSelect<
           <ChevronsUpDown className="ml-2 size-4 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent
-        data-mobile-entity-picker=""
+      <MobileEntityPickerContent
         align={align}
         collisionPadding={16}
         disablePortal={disablePortal}
@@ -311,7 +311,7 @@ export function SearchableSelect<
             )}
           </CommandList>
         </Command>
-      </PopoverContent>
+      </MobileEntityPickerContent>
     </Popover>
   );
 }

@@ -3009,25 +3009,48 @@ span.paperclip-mention-chip[data-mention-kind="external-object"] {
   .runner-activity-roll-out { display: none; }
 }
 
-/* Keep entity-picker search controls visible when a narrow viewport opens its
-   software keyboard. The fixed sheet also avoids scale motion during mobile
-   viewport resizing. */
+/* On phones, entity pickers are sheets inside the visible viewport. Radix's
+   translated wrapper would otherwise become the fixed content's containing
+   block, collapsing auto width and placing the sheet behind the keyboard. */
 @media (max-width: 40rem) {
+  [data-radix-popper-content-wrapper]:has(> [data-mobile-entity-picker]) {
+    --entity-picker-gutter: calc(var(--spacing) * 4);
+    inset: auto var(--entity-picker-gutter) calc(100% - var(--entity-picker-viewport-top, 0px) - var(--entity-picker-viewport-height, 100dvh) + max(var(--entity-picker-gutter), env(safe-area-inset-bottom))) !important;
+    min-width: 0 !important;
+    /* Keep a composited layer when the keyboard resizes the sheet. */
+    transform: translate3d(0, 0, 0) !important;
+  }
+
   [data-mobile-entity-picker] {
-    position: fixed !important;
-    inset: auto calc(var(--spacing) * 4) max(calc(var(--spacing) * 4), env(safe-area-inset-bottom)) !important;
-    width: auto !important;
+    position: relative !important;
+    inset: auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
     max-width: none !important;
-    max-height: calc(100dvh - calc(var(--spacing) * 8)) !important;
+    max-height: calc(var(--entity-picker-viewport-height, 100dvh) - var(--entity-picker-gutter) - max(var(--entity-picker-gutter), env(safe-area-inset-bottom))) !important;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     transform: none !important;
-    transform-origin: bottom center !important;
     animation: none !important;
   }
 
+  [data-mobile-entity-picker] > input,
+  [data-mobile-entity-picker] [data-slot="command-input-wrapper"] {
+    flex-shrink: 0;
+  }
+
+  [data-mobile-entity-picker] [data-slot="command"] {
+    min-height: 0;
+  }
+
+  [data-mobile-entity-picker] [data-mobile-entity-picker-list],
   [data-mobile-entity-picker] [data-slot="command-list"] {
-    max-height: min(var(--sz-300px), calc(100dvh - calc(var(--spacing) * 24))) !important;
+    min-height: 0;
+    overflow-y: auto;
   }
 }
+
 :root {
   --announcement-width: 22rem;
   --announcement-available-width: calc(100vw - var(--spacing) * 6);

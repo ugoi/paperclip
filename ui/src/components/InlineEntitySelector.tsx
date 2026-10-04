@@ -1,7 +1,8 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Popover, PopoverTrigger } from "@/components/ui/popover";
 import { orderItemsBySelectedAndRecent } from "../lib/recent-selections";
+import { MobileEntityPickerContent } from "@/components/MobileEntityPickerContent";
 import { cn } from "../lib/utils";
 
 export interface InlineEntityOption {
@@ -141,8 +142,7 @@ export const InlineEntitySelector = forwardRef<HTMLButtonElement, InlineEntitySe
               : (currentOption?.label ?? <span className="text-muted-foreground">{placeholder}</span>)}
           </button>
         </PopoverTrigger>
-        <PopoverContent
-          data-mobile-entity-picker=""
+        <MobileEntityPickerContent
           align="start"
           side="bottom"
           collisionPadding={16}
@@ -203,7 +203,7 @@ export const InlineEntitySelector = forwardRef<HTMLButtonElement, InlineEntitySe
               }
             }}
           />
-          <div className="max-h-56 overflow-y-auto overscroll-contain py-1 touch-pan-y">
+          <div data-mobile-entity-picker-list="" className="max-h-56 overflow-y-auto overscroll-contain py-1 touch-pan-y">
             {filteredOptions.length === 0 ? (
               <p className="px-2 py-2 text-xs text-muted-foreground">{emptyMessage}</p>
             ) : (
@@ -228,7 +228,7 @@ export const InlineEntitySelector = forwardRef<HTMLButtonElement, InlineEntitySe
               })
             )}
           </div>
-        </PopoverContent>
+        </MobileEntityPickerContent>
       </Popover>
     );
   },
