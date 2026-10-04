@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { IssueWorkMode } from "@paperclipai/shared";
 import { Check, ClipboardList, MessageCircleQuestion, Paperclip, Plus, Target, X, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useMobileEntityPickerViewportStyle } from "@/hooks/useMobileEntityPickerViewportStyle";
 import { workModeMetaFor } from "@/lib/work-mode-meta";
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import {
@@ -40,6 +41,7 @@ export function ComposerAddMenu({
     return () => query.removeEventListener("change", update);
   }, []);
   const mobile = mobileProp ?? narrow;
+  const mobileViewportStyle = useMobileEntityPickerViewportStyle();
   if (!onModeChange && !onAttachFile && !onGoal) return null;
   const actions: Array<{ id: string; label: string; detail?: string; Icon: LucideIcon; select: () => void; disabled?: boolean; selected?: boolean }> = [
     ...(onAttachFile ? [{ id: "composer-add-file", label: "Files and images", Icon: Paperclip, select: onAttachFile, disabled: attachDisabled }] : []),
@@ -63,7 +65,8 @@ export function ComposerAddMenu({
     <DialogTrigger asChild>{trigger}</DialogTrigger>
     <DialogContent aria-describedby={undefined} showCloseButton={false} data-testid={menuTestId}
       onCloseAutoFocus={(event) => { if (goalFocusRef.current) { event.preventDefault(); goalFocusRef.current = false; } }}
-      className="composer-mobile-dialog top-(--pct-50) -translate-y-(--pct-50) gap-0 overflow-y-auto p-0">
+      style={mobileViewportStyle}
+      className="composer-mobile-dialog gap-0 overflow-y-auto overscroll-contain p-0">
       <div className="flex items-center gap-2 px-3 py-2">
         <DialogTitle className="min-w-0 flex-1 text-sm font-medium">Add</DialogTitle>
         <DialogClose asChild><button type="button" aria-label="Close Add menu" className="grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-accent"><X className="size-4" /></button></DialogClose>

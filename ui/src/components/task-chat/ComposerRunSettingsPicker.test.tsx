@@ -33,7 +33,7 @@ async function click(label: string) {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
-function render(onAssigneeChange: (value: string) => void, onSettingsChange: () => void, useCatalog = false) {
+function render(onAssigneeChange: (value: string) => void, onSettingsChange: () => void, useCatalog = false, mobile = false) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -42,12 +42,13 @@ function render(onAssigneeChange: (value: string) => void, onSettingsChange: () 
     <ComposerRunSettingsPicker companyId="company-1" assigneeValue="agent:a1" currentAssigneeValue="agent:a1"
       options={options} agents={agents} settings={{ model: "gpt-6-sol", effort: "high", fast: true }}
       onAssigneeChange={onAssigneeChange} onSettingsChange={onSettingsChange}
-      modelOptionsOverride={useCatalog ? undefined : []} />
+      mobile={mobile} modelOptionsOverride={useCatalog ? undefined : []} />
   </QueryClientProvider>));
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   flushSync(() => root?.unmount());
   root = null;
   container?.remove();
@@ -143,5 +144,30 @@ describe("composer assignee picker", () => {
     await click("No assignee");
     expect(onAssigneeChange).toHaveBeenCalledWith("");
     expect(onSettingsChange).toHaveBeenCalledWith({ model: null, effort: null, fast: false });
+  });
+});
+
+
+describe("mobile composer viewport", () => {
+  it("tracks keyboard resize and scroll, ignores invalid heights, and removes listeners", async () => {
+    const viewport = Object.assign(new EventTarget(), { height: 452 });
+    vi.stubGlobal("visualViewport", viewport);
+    const removeListener = vi.spyOn(viewport, "removeEventListener");
+    render(vi.fn(), vi.fn(), false, true);
+    await click("Select assignee, model and effort");
+    const dialog = document.querySelector<HTMLElement>('[data-testid="composer-mobile-dialog"]')!;
+    const height = () => dialog.style.getPropertyValue("--mobile-entity-picker-visual-viewport-height");
+    expect(height()).toBe("452px");
+    await click("Choose assignee");
+    await act(async () => { viewport.height = 189; viewport.dispatchEvent(new Event("resize")); });
+    expect(height()).toBe("189px");
+    await act(async () => { viewport.height = 0; viewport.dispatchEvent(new Event("resize")); });
+    expect(height()).toBe("189px");
+    await act(async () => { viewport.height = 452; viewport.dispatchEvent(new Event("scroll")); });
+    expect(height()).toBe("452px");
+    flushSync(() => root!.unmount());
+    root = null;
+    expect(removeListener).toHaveBeenCalledWith("resize", expect.any(Function));
+    expect(removeListener).toHaveBeenCalledWith("scroll", expect.any(Function));
   });
 });
