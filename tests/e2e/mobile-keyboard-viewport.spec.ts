@@ -88,6 +88,34 @@ test("composer lists stay above the keyboard and scroll to the last model", asyn
   await last.tap();
   await page.getByRole("button", { name: "Close picker" }).tap();
   await expect(page.getByTestId("task-chat-composer-model-label")).toHaveText("Keyboard Model 8");
+  await page.getByRole("button", { name: "Add to composer", exact: true }).tap();
+  const add = page.getByRole("dialog", { name: "Add", exact: true });
+  const closeAdd = add.getByRole("button", { name: "Close Add menu" });
+  await insideKeyboardViewport(add);
+  await insideKeyboardViewport(closeAdd);
+  const lastAction = add.getByTestId("composer-add-ask");
+  await swipe(page, lastAction.locator(".."));
+  await insideKeyboardViewport(closeAdd);
+  await lastAction.tap({ trial: true });
+  await closeAdd.tap();
+  const dock = page.getByTestId("task-chat-composer-dock");
+  const wasDark = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+  try {
+    for (const dark of [false, true]) {
+      await page.evaluate((dark) => document.documentElement.classList.toggle("dark", dark), dark);
+      await expect.poll(() => dock.evaluate((el) => {
+        const style = getComputedStyle(el);
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 1;
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = style.backgroundColor;
+        context.fillRect(0, 0, 1, 1);
+        return { filter: style.backdropFilter, alpha: context.getImageData(0, 0, 1, 1).data[3] };
+      })).toEqual({ filter: "none", alpha: 255 });
+    }
+  } finally {
+    await page.evaluate((dark) => document.documentElement.classList.toggle("dark", dark), wasDark);
+  }
   expect((await json(await request.get(`/api/issues/${issue.id}`))).assigneeAgentId).toBeNull();
   expect(agent.id).toBeTruthy();
 });

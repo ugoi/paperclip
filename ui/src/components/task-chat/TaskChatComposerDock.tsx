@@ -22,7 +22,7 @@ export function TaskChatComposerDock({ children, mobile, streamlined }: TaskChat
       streamlined && "md:px-0 md:pb-0",
       // Android can lose the sticky composited layer when the IME pans the
       // visual viewport. An opaque mobile dock needs no backdrop-filter layer.
-      mobile ? "bg-background pt-1 dark:bg-transparent" : !streamlined &&
+      mobile ? "bg-background pt-1" : !streamlined &&
         "bg-background/80 pt-1 backdrop-blur supports-[backdrop-filter]:bg-background/60 dark:bg-transparent dark:backdrop-blur-none dark:supports-[backdrop-filter]:bg-transparent",
     )}
   >
