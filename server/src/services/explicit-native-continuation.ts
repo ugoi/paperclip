@@ -1,15 +1,15 @@
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
-import { canContinueCancelledRun } from "./run-cancellation.js";
+import { canContinueCancelledRun, readRunCancellation } from "./run-cancellation.js";
 import { readQueuedInteractionResponse } from "./queued-interaction-response.js";
 import { isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { hasNativeLocalProcessStop, hasHistoricalSuspendedNativeSession } from "./native-local-process-stop.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteLeaseCleanupScope } from "./remote-execution-termination.js";
 import { z } from "zod";
-import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import {
   agents, agentWakeupRequests, approvals, issueApprovals, issueThreadInteractions,
-  environmentLeases, heartbeatRuns, issueComments, issueRecoveryActions,
+  environmentLeases, heartbeatRunEvents, heartbeatRuns, issueComments, issueRecoveryActions,
   issues, nativeRunFinalizations, nativeRunResults, type Db,
 } from "@paperclipai/db";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
@@ -26,6 +26,44 @@ const terminal = ["failed", "interrupted", "timed_out", "cancelled"];
 function processStopped(pid: number): boolean {
   try { process.kill(pid, 0); return false; }
   catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+}
+
+/** The unique server error is written only before the dispatch callback. Older
+ * rows lack bootstrap metadata, so also require the repair binding and reject
+ * all retained execution evidence. Never rewrite their cancellation or outcomes.
+ * Admission still checks controller ownership, leases, user intent and gates.
+ */
+async function isUndispatchedDispositionRepair(db: Db, run: Run): Promise<boolean> {
+  const context = run.contextSnapshot;
+  const episode = context?.legacyDispositionEpisode as Record<string, unknown> | undefined;
+  const cancellation = readRunCancellation(run.resultJson);
+  const bootstrap = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  if (run.runtimeMode !== "legacy" || run.status !== "cancelled" ||
+      run.errorCode !== "legacy_disposition_repair_suppressed" ||
+      // Queue adoption can replace wakeReason with the user's message reason.
+      // scheduleDispositionRepairAttempt retains this server-owned marker.
+      context?.retryReason !== "issue_disposition_repair" ||
+      !episode || typeof episode.id !== "string" || !episode.id ||
+      typeof episode.attempt !== "number" || episode.attempt < 1 ||
+      typeof context.dispositionRepairSourceRunId !== "string" || !context.dispositionRepairSourceRunId ||
+      run.processPid !== null || run.processGroupId !== null || run.processStartedAt !== null ||
+      run.nativeSessionId !== null || run.nativeIssueId !== null || run.sessionIdAfter !== null ||
+      run.externalRunId !== null || run.exitCode !== null || run.signal !== null ||
+      run.usageJson !== null || run.stdoutExcerpt || run.stderrExcerpt || run.logBytes ||
+      run.lastOutputAt !== null || run.lastOutputSeq !== 0 || run.lastOutputBytes ||
+      Object.keys(run.resultJson ?? {}).some(key => !["cancellation", "executionRecovery"].includes(key)) ||
+      (run.resultJson?.cancellation != null && !cancellation) ||
+      (bootstrap && (bootstrap.kind !== "bootstrap" || bootstrap.providerWorkStarted !== false)) ||
+      (cancellation && !((cancellation.source === "unknown" && !cancellation.expected) ||
+        (cancellation.source === "control_plane" && cancellation.expected && cancellation.initiator.type === "system")))) return false;
+  // Be conservative about historical event types. Preparation and cleanup may
+  // be present; invocation, provider, process and tool events invalidate proof.
+  const [execution] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents).where(and(
+    eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id),
+    or(isNotNull(heartbeatRunEvents.sourceEventId),
+      notInArray(heartbeatRunEvents.eventType, ["lifecycle", "instruction_save", "instruction_cleanup"])),
+  )).limit(1);
+  return !execution;
 }
 
 /** Validate the whole saved queue, preserving order and original authors.
@@ -200,13 +238,14 @@ export async function admitExplicitNativeContinuation(input: {
       return blocked("workspace_repair_required", "Verify safe workspace staging or repair before continuing. Your message is saved.");
     }
     const cancelledStartup = await isCancelledNativeStartup(db, run, coordinator);
+    const suppressedRepair = legacyUserTurn && !coordinator && await isUndispatchedDispositionRepair(db, run);
     if (partiallyDeliveredQueue && run.runtimeMode !== "native" && !unusedAdmission && !cancelledStartup) return null;
     if ((queuedInterrupt || queuedRequest) && !legacyUserTurn && !unusedAdmission &&
         !(queuedRequest && run.runtimeMode === "native" &&
           (run.status !== "cancelled" || authorizedAt > run.finishedAt!)) &&
         !(queuedRequest && cancelledStartup && authorizedAt > run.finishedAt!) &&
         !(queuedInterrupt && response?.source.requiresFreshSession && run.runtimeMode === "native")) return null;
-    if (queuedRequest && !queuedInterrupt && run.status === "cancelled" && !unusedAdmission &&
+    if (queuedRequest && !queuedInterrupt && run.status === "cancelled" && !unusedAdmission && !suppressedRepair &&
         !canContinueCancelledRun(run) && !(cancelledStartup && authorizedAt > run.finishedAt!)) return null;
     if (retry && run.status === "cancelled" && !canContinueCancelledRun(run) && !cancelledStartup)
       return blocked("cancelled_by_operator", "Inspect the stopped run and send a new message to continue.");
@@ -247,7 +286,7 @@ export async function admitExplicitNativeContinuation(input: {
       }))) return null;
     } else {
       if (leases.some(lease => !lease.releasedAt || lease.cleanupStatus === "failed")) return blocked("local_cleanup", "Waiting for the previous environment to finish cleanup. Your message will start automatically.");
-      if (!unusedAdmission && !cancelledStartup) {
+      if (!unusedAdmission && !cancelledStartup && !suppressedRepair) {
         // A missing process identity is not evidence that a provider exited.
         if (!run.processPid && !run.processGroupId &&
             !await hasNativeLocalProcessStop(db, companyId, run.id) &&

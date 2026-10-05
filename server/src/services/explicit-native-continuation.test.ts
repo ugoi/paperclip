@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { createPostgresWakeQueueAdapter } from "../modules/wake-queue/adapters/postgres.js";
@@ -13,7 +14,7 @@ import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
 import {
-  approvals, issueApprovals, issueThreadInteractions, chatConversations, chatEndpoints, toolApplications, toolConnections,
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, approvals, issueApprovals, issueThreadInteractions, chatConversations, chatEndpoints, toolApplications, toolConnections,
   agentWakeupRequests, agents, companies, createDb, heartbeatRunEvents, heartbeatRuns, issueComments, issueRecoveryActions,
   issues, nativeRunFinalizations, nativeRunResults, completionContracts, environmentLeases, environments, issueRelations, issueTreeHolds, issueTreeHoldMembers,
 } from "@paperclipai/db";
@@ -28,7 +29,7 @@ const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("explicit native conversation continuation", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
-  beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("explicit-native-message-"); db = createDb(database.connectionString); }, 30000);
+  beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("explicit-native-message-"); db = createDb(database.connectionString); }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await database?.cleanup(); });
   async function seed() {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
@@ -52,6 +53,74 @@ const support = await getEmbeddedPostgresTestSupport();
       actorType: "user", actorId: "board", reason: "issue_commented" };
   }
   type Fixture = Awaited<ReturnType<typeof seed>>;
+  it.each(["historical", "recorded", "saved", "repair_wake", "wake_reason_only", "pid", "group", "process_start", "output", "usage", "session", "invoke", "tool", "unknown_event", "operator", "unknown_code", "missing_episode", "active_lease", "failed_cleanup", "approval", "retry"])(
+    "only admits an undispatched suppressed repair with settled cleanup (%s)", async kind => {
+      const f = await seed();
+      const episode = { id: randomUUID(), attempt: 1, maxAttempts: 2 };
+      await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, f.agentId));
+      await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+      await db.update(issueRecoveryActions).set({ cause: "legacy_execution_requires_reconciliation" })
+        .where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+      const [source] = await db.update(heartbeatRuns).set({
+        runtimeMode: "legacy", nativeIssueId: null, status: "cancelled", startedAt: new Date("2026-09-11T09:59:00Z"),
+        errorCode: kind === "unknown_code" ? "cancelled" : "legacy_disposition_repair_suppressed",
+        processPid: kind === "pid" ? process.pid : null,
+        processGroupId: kind === "group" ? Number(execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" }).trim()) : null,
+        processStartedAt: kind === "process_start" ? new Date() : null,
+        stdoutExcerpt: kind === "output" ? "provider output" : null,
+        usageJson: kind === "usage" ? { inputTokens: 1 } : null,
+        sessionIdAfter: kind === "session" ? "provider-session" : null,
+        // Queue adoption can replace wakeReason; retryReason retains the server repair marker.
+        contextSnapshot: { issueId: f.issueId,
+          wakeReason: ["repair_wake", "wake_reason_only"].includes(kind) ? "issue_disposition_repair" : "issue_commented",
+          ...(kind === "wake_reason_only" ? {} : { retryReason: "issue_disposition_repair" }),
+          ...(kind === "missing_episode" ? {} : { legacyDispositionEpisode: episode }),
+          retryOfRunId: episode.id, dispositionRepairSourceRunId: episode.id },
+        resultJson: { cancellation: { source: kind === "operator" ? "operator" : kind === "recorded" ? "control_plane" : "unknown",
+          expected: ["operator", "recorded"].includes(kind), initiator: { type: kind === "operator" ? "user" : "system" },
+          reason: "Disposition repair suppressed: recorded_disposition", recordedAt: "2026-09-11T10:00:00Z" },
+          ...(kind === "recorded" ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } : {}),
+        },
+      }).where(eq(heartbeatRuns.id, f.sourceRunId)).returning();
+      if (["historical", "recorded", "saved", "repair_wake"].includes(kind)) await db.insert(heartbeatRunEvents).values(
+        ["lifecycle", "instruction_save", "lifecycle", "lifecycle"].map((eventType, index) => ({
+          companyId: f.companyId, agentId: f.agentId, runId: f.sourceRunId, seq: index + 1, eventType,
+          message: ["started", "instruction snapshot unavailable", "run scratch cleaned", "Automatic recovery stopped."][index],
+        })),
+      );
+      if (["invoke", "tool", "unknown_event"].includes(kind)) await db.insert(heartbeatRunEvents).values({
+        companyId: f.companyId, agentId: f.agentId, runId: f.sourceRunId, seq: 1,
+        eventType: kind === "invoke" ? "adapter.invoke" : kind === "tool" ? "tool_call" : "unrecognized_execution_event",
+      });
+      if (["active_lease", "failed_cleanup"].includes(kind)) {
+        const [environment] = await db.select().from(environments).where(eq(environments.driver, "local"));
+        const environmentId = environment.id;
+        await db.insert(environmentLeases).values({ companyId: f.companyId, environmentId, heartbeatRunId: f.sourceRunId,
+          issueId: f.issueId, provider: "local", status: kind === "active_lease" ? "active" : "released", leasePolicy: "ephemeral",
+          releasedAt: kind === "active_lease" ? null : new Date(), cleanupStatus: kind === "failed_cleanup" ? "failed" : null });
+      }
+      if (kind === "approval") await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+        kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Continue?" } });
+      const queueId = randomUUID();
+      if (kind === "saved") await db.insert(agentWakeupRequests).values({ id: queueId, companyId: f.companyId,
+        agentId: f.agentId, source: "automation", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedByActorType: "user", requestedByActorId: "board",
+        payload: { issueId: f.issueId, commentId: f.commentId,
+          _paperclipWakeContext: { issueId: f.issueId, wakeReason: "issue_commented", wakeCommentIds: [f.commentId] } } });
+      const admitted = await db.transaction(tx => admitExplicitNativeContinuation({ ...f,
+        ...(kind === "saved" ? { queuedCommentRequestId: queueId } : {}),
+        ...(kind === "retry" ? { reason: "retry_failed_run", failedRunId: f.sourceRunId, commentId: null } : {}),
+        db: tx as unknown as typeof db }));
+      if (["historical", "recorded", "saved", "repair_wake"].includes(kind)) {
+        expect(admitted?.previousRunId).toBe(f.sourceRunId);
+        expect(await db.transaction(tx => admitExplicitNativeContinuation({ ...f, db: tx as unknown as typeof db }))).toBeNull();
+        const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+        expect(action.evidence.automaticRecovery).toMatchObject({ actionOutcome: "unknown" });
+      } else expect(admitted).toBeNull();
+      const [unchanged] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+      expect(unchanged).toEqual(source);
+    });
+
   it.each(["handoff", "foreign_task", "running_source", "different_owner", "mention", "interaction", "chat"])("adopts former-owner comments only during an authorized handoff (%s)", async kind => {
     const f = await seed(), nextAgentId = randomUUID(), queueId = randomUUID();
     await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));

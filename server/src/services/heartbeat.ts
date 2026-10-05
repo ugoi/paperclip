@@ -22774,6 +22774,12 @@ export function heartbeatService(
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
             finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
             error: `Disposition repair suppressed: ${repairBlock}`,
+            // This gate runs before either provider dispatch callback. startedAt
+            // records controller preparation, not provider execution.
+            resultJson: {
+              cancellation: requestedRunCancellation(null, `Disposition repair suppressed: ${repairBlock}`),
+              executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+            },
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   agents,
   agentWakeupRequests,
   companies,
@@ -27,6 +28,8 @@ import {
   MAX_TURN_CONTINUATION_WAKE_REASON,
   heartbeatService,
 } from "../services/heartbeat.ts";
+import { isUnexpectedRunCancellation } from "../services/run-cancellation.js";
+import { legacyExecutionNeedsReconciliation } from "../services/legacy-execution-recovery.js";
 import { runningProcesses } from "../adapters/index.ts";
 import { recoveryService } from "../services/recovery/service.ts";
 import { withQueuedCommentIdsInWakePayload } from "../services/issue-queued-comment-queue.ts";
@@ -166,7 +169,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       },
     });
     await ensureIssueRelationsTable(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     beforeContinuationDispatchCheck = null;
@@ -993,6 +996,37 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
 
     expect(countExecuteCallsForRun(run!.id)).toBe(1);
+  });
+
+  it("records a repair suppressed at dispatch as expected with no provider work", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID(), sourceRunId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Recorded disposition",
+      status: "in_review", assigneeAgentId: agentId, responsibleUserId: "responsible-user" });
+    await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId, agentId,
+      status: "succeeded", runtimeMode: "legacy", contextSnapshot: { issueId }, finishedAt: new Date() });
+    const run = await heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system",
+      reason: "issue_disposition_repair", payload: { issueId }, contextSnapshot: { issueId,
+        wakeReason: "issue_disposition_repair", retryReason: "issue_disposition_repair",
+        retryOfRunId: sourceRunId, dispositionRepairSourceRunId: sourceRunId,
+        legacyDispositionEpisode: { id: sourceRunId, attempt: 1, maxAttempts: 2 },
+      } });
+    expect(run).not.toBeNull();
+    expect(await waitForCondition(async () => {
+      const [current] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+      return current?.status === "cancelled";
+    }, 10000)).toBe(true);
+    const [cancelled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+    expect(cancelled.errorCode).toBe("legacy_disposition_repair_suppressed");
+    expect(cancelled.error).toBe("Disposition repair suppressed: recorded_disposition");
+    expect(cancelled.resultJson).toMatchObject({
+      cancellation: { source: "control_plane", expected: true, initiator: { type: "system" } },
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    });
+    expect(countExecuteCallsForRun(run!.id)).toBe(0);
+    expect(cancelled.processPid).toBeNull();
+    expect(isUnexpectedRunCancellation(cancelled)).toBe(false);
+    expect(legacyExecutionNeedsReconciliation(cancelled)).toBe(false);
   });
 
   it("allows legacy generic timer wakes by default when no skip policy is set", async () => {
