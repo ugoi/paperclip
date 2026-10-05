@@ -82,52 +82,34 @@ async function ensureIssueRelationsTable(db: ReturnType<typeof createDb>) {
   `));
 }
 
-async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 3_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await fn()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return fn();
+// Dispatch includes workspace preparation before the mocked adapter is called.
+// Allow a bounded 10 s for that work; a timeout must also fail callers that do
+// not inspect the return value, rather than reading an intermediate run state.
+async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 10_000) {
+  return vi.waitUntil(fn, { timeout: timeoutMs, interval: 50 });
 }
 
 async function cleanupHeartbeatInvalidationFixture(db: ReturnType<typeof createDb>) {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    try {
-      await db.execute(sql.raw(`
-        TRUNCATE TABLE
-          "company_skills",
-          "issue_comments",
-          "issue_documents",
-          "document_revisions",
-          "documents",
-          "issue_relations",
-          "issue_tree_holds",
-          "issues",
-          "heartbeat_run_events",
-          "cost_events",
-          "activity_log",
-          "heartbeat_runs",
-          "agent_wakeup_requests",
-          "agent_runtime_state",
-          "agents",
-          "companies"
-        RESTART IDENTITY CASCADE
-      `));
-      return;
-    } catch (error) {
-      const isLateCommentRace =
-        error instanceof Error &&
-        error.message.includes("issue_comments_issue_id_issues_id_fk");
-      if (!isLateCommentRace || attempt === 9) {
-        throw error;
-      }
-
-      // Heartbeat completion can write issue-thread comments shortly after the
-      // run leaves queued/running. Retry the dependent deletes once those land.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
+  await db.execute(sql.raw(`
+    TRUNCATE TABLE
+      "company_skills",
+      "issue_comments",
+      "issue_documents",
+      "document_revisions",
+      "documents",
+      "issue_relations",
+      "issue_tree_holds",
+      "issues",
+      "heartbeat_run_events",
+      "cost_events",
+      "activity_log",
+      "heartbeat_runs",
+      "agent_wakeup_requests",
+      "agent_runtime_state",
+      "agents",
+      "companies"
+    RESTART IDENTITY CASCADE
+  `));
 }
 
 type SeedOptions = {
@@ -172,6 +154,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
+    // Terminal run status precedes final DB writes and can dispatch another
+    // queued run. Drain the registered executions before resetting their mocks
+    // or taking TRUNCATE locks. Status polling is not a completion barrier.
+    await heartbeat.drainActiveRunExecutions();
     beforeContinuationDispatchCheck = null;
     afterContinuationDispatchCheck = null;
     mockAdapterExecute.mockReset();
@@ -185,21 +171,6 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       model: "test-model",
     }));
     runningProcesses.clear();
-    let idlePolls = 0;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const runs = await db
-        .select({ status: heartbeatRuns.status })
-        .from(heartbeatRuns);
-      const hasActiveRun = runs.some((run) => run.status === "queued" || run.status === "running");
-      if (!hasActiveRun) {
-        idlePolls += 1;
-        if (idlePolls >= 3) break;
-      } else {
-        idlePolls = 0;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
     await cleanupHeartbeatInvalidationFixture(db);
   });
 
@@ -317,6 +288,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     });
   }
 
+  // These cases drain multiple runs, including completion-triggered repairs.
+  // The measured drain alone can take 14 s on a serial worker.
   it.each([
     { name: "assignments", sameIssue: true, first: "assignment", second: "assignment" },
     { name: "unrelated tasks", sameIssue: false, first: "assignment", second: "assignment" },
@@ -367,7 +340,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       release();
       await heartbeat.drainActiveRunExecutions();
     }
-  });
+  }, 30_000);
 
   it.each(["active_lease", "pending_cleanup", "failed_cleanup", "finalizer_lease", "workspace_finalization",
     "retained_ready", "retained_missing_receipt", "retained_failed", "retained_wrong_policy"])(
