@@ -1176,6 +1176,23 @@ preserving history, unknown action outcomes, and attempt counts. Pauses, approva
 budgets, task ownership, and terminal task status still gate admission. No
 automatic provider replay is authorized by a cancelled startup.
 
+A legacy disposition repair suppressed by the final dispatch gate records an
+expected control-plane cancellation and bootstrap evidence that provider work
+never started. A controller `startedAt` timestamp does not imply provider work.
+This suppression does not reset or replenish the repair attempt budget.
+
+For older suppressed repairs without bootstrap metadata, explicit conversation
+admission requires the exact server suppression code, retained `retryReason`
+repair marker and repair episode binding. An adopted message can change
+`wakeReason` to `issue_commented`. Admission also requires
+no native coordinator, and no retained process, session, output, usage or provider
+event evidence. Unknown event types retain the hold. The usual ownership and
+cleanup checks still apply, including remote termination receipts. Only new user
+input or a validated saved message queue can continue; Retry does not replay the
+repair. Source rows, cancellation provenance and unknown outcomes stay unchanged.
+Ambiguous records still need the supported board execution-reconciliation flow;
+there is no database backfill or automatic replay.
+
 ### Delivering queued messages after a legacy run stops
 
 The legacy queued-message Interrupt action accepts a null `targetRunId` when
