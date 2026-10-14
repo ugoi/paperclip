@@ -60,8 +60,10 @@ for (const { unfinishedWrite, stopResponse, holdFirstFollowup } of [
       const writesAtStop = unfinishedWrite ? await readFile(path.join(root, "writes"), "utf8") : null;
       if (stopResponse) {
         await page.reload();
+        // Reload mounts the rich-text editor after the task shell. Use the same
+        // 30s UI-readiness budget as the restart suite, then assert Stop state.
+        await expect(editor).toBeVisible({ timeout: 30_000 });
         await expect(page.getByTestId("paused-composer-takeover")).toHaveCount(0);
-        await expect(editor).toBeVisible();
         expect((await json(await request.get(`/api/issues/${issue.id}/tree-control/state`))).activePauseHold).toBeNull();
         await expect(page.getByRole("button", { name: "Resume task", exact: true })).toHaveCount(0);
         const saved = await json(await request.get(`/api/issues/${issue.id}/queued-comments`));
