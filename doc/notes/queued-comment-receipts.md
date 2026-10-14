@@ -111,7 +111,10 @@ Claude-local and Codex-local packages. Already built bundled packages are packed
 with `--ignore-scripts`: their source-relative prepack scripts are unavailable
 in staging. This does not suppress lifecycle hooks during the final consumer
 installation. Missing runtime skills abort staging rather than silently shipping
-an incomplete adapter/server package.
+an incomplete adapter/server package. The extracted archive must contain a
+nonempty regular `skills/paperclip/SKILL.md` before any build runs; an existing
+empty skills directory is not sufficient. Rejection preserves the active
+payload, manifest, shim and user data, and a corrected archive can be retried.
 
 ```sh
 PAPERCLIP_BUILD_COMMIT=<reviewed-full-commit> node <disposable-checkout>/cli/dist/index.js install --repo ugoi/paperclip --ref <reviewed-full-commit> --yes

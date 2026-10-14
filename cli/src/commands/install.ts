@@ -274,6 +274,13 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
   try {
     await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--output", archivePath, `https://codeload.github.com/${repo}/tar.gz/${sha}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
     await runCommand("tar", ["-xzf", archivePath, "--strip-components=1", "-C", checkoutPath], { maxBuffer: 4 * 1024 * 1024 });
+    // npm silently omits an empty skills tree. Require the core runtime skill
+    // before spending time on builds or allowing a payload to be activated.
+    const runtimeSkill = path.join(checkoutPath, "skills", "paperclip", "SKILL.md");
+    if (!fs.existsSync(runtimeSkill) || !fs.statSync(runtimeSkill).isFile()
+      || !fs.readFileSync(runtimeSkill, "utf8").trim()) {
+      throw new Error("Git source is missing required runtime skill content: skills/paperclip/SKILL.md");
+    }
     await runCommand("corepack", ["enable", "pnpm", "--install-directory", pnpmShimDir], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });

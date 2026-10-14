@@ -23,6 +23,7 @@ import {
   resolveInstallStorePaths,
   withInstallStoreLock,
   writeInstallManifestAtomic,
+  writeManagedShim,
 } from "../install-store.js";
 import { resolveCliVersion } from "../version.js";
 import { systemdServiceName } from "../services/service-manager.js";
@@ -254,6 +255,56 @@ describe("managed install commands", () => {
     expect(fs.existsSync(payloadPathFor(paths, "git", sha.slice(0, 12)))).toBe(false);
     expect(fs.existsSync(paths.currentPath)).toBe(false);
   });
+
+  it.each(["empty-tree", "missing-manifest", "empty-manifest", "whitespace-manifest", "directory-manifest"])(
+    "rejects %s runtime skills without changing an active install, then retries cleanly", async (invalid) => {
+      const sha = "f".repeat(40);
+      const paths = resolveInstallStorePaths();
+      initializeInstallStore(paths);
+      const previous = payloadPathFor(paths, "npm", "1.0.0");
+      const previousCli = path.join(previous, "node_modules/paperclipai/dist/index.js");
+      fs.mkdirSync(path.dirname(previousCli), { recursive: true });
+      fs.writeFileSync(previousCli, "retained CLI");
+      flipCurrentAtomic(previous, paths);
+      writeInstallManifestAtomic({ schemaVersion: INSTALL_MANIFEST_VERSION, source: "npm", version: "1.0.0",
+        channel: "pinned", payloadPath: previous, installedAt: new Date().toISOString(), previous: [] }, paths);
+      writeManagedShim(paths);
+      const manifestBefore = fs.readFileSync(paths.manifestPath);
+      const shimBefore = fs.readFileSync(paths.shimPath);
+      const data = path.join(paths.paperclipHome, "retained-data");
+      fs.writeFileSync(data, "user data");
+      const delegate = createGitCheckoutRunCommand(sha);
+      const runCommand: CommandRunner = async (file, args, options) => {
+        const result = await delegate(file, args, options);
+        if (file === "tar") {
+          const skills = path.join(args[args.indexOf("-C") + 1], "skills");
+          const entry = path.join(skills, "paperclip/SKILL.md");
+          if (invalid === "empty-tree") {
+            fs.rmSync(skills, { recursive: true });
+            fs.mkdirSync(skills);
+          } else if (invalid === "missing-manifest" || invalid === "directory-manifest") {
+            fs.rmSync(entry);
+            if (invalid === "directory-manifest") fs.mkdirSync(entry);
+          } else fs.writeFileSync(entry, invalid === "empty-manifest" ? "" : " \n\t");
+        }
+        return result;
+      };
+      await expect(installCommand({ repo: "paperclipai/paperclip", ref: sha, yes: true }, { runCommand }))
+        .rejects.toThrow("skills/paperclip/SKILL.md");
+      expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(previous));
+      expect(fs.readFileSync(paths.manifestPath)).toEqual(manifestBefore);
+      expect(fs.readFileSync(paths.shimPath)).toEqual(shimBefore);
+      expect(fs.readFileSync(previousCli, "utf8")).toBe("retained CLI");
+      expect(fs.readFileSync(data, "utf8")).toBe("user data");
+      expect(fs.existsSync(paths.lockPath)).toBe(false);
+      expect(fs.readdirSync(path.join(paths.installsRoot, "git"))).toEqual([]);
+      expect(delegate.mock.calls.some(([file]) => ["corepack", "bash", "npm"].includes(file))).toBe(false);
+      await installCommand({ repo: "paperclipai/paperclip", ref: sha, yes: true }, { runCommand: createGitCheckoutRunCommand(sha) });
+      expect(readInstallManifest(paths)?.sha).toBe(sha);
+      expect(readInstallManifest(paths)?.previous[0]?.payloadPath).toBe(previous);
+      expect(fs.readFileSync(data, "utf8")).toBe("user data");
+    },
+  );
 
   it("resolves the complete server workspace dependency closure in dependency order", () => {
     const checkout = path.join(root, "checkout");
