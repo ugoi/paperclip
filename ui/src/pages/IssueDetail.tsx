@@ -1229,6 +1229,7 @@ type IssueDetailChatTabProps = {
   initialHistoryError?: boolean;
   onRetryInitialHistory?: () => void;
   locallyQueuedCommentRunIds: ReadonlyMap<string, string>;
+  onConsumedQueuedComments?: (ids: string[]) => void;
   interactions: IssueThreadInteraction[];
   documents: IssueDocumentSummary[];
   workProducts: IssueWorkProduct[];
@@ -1375,6 +1376,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   initialHistoryError = false,
   onRetryInitialHistory,
   locallyQueuedCommentRunIds,
+  onConsumedQueuedComments,
   interactions,
   documents,
   workProducts,
@@ -1547,12 +1549,6 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       }
     >
   >(() => new Map());
-  const [localInterruptPlacements, setLocalInterruptPlacements] = useState<
-    ReadonlyMap<
-      string,
-      { anchorAt: string; sequence: number; comment?: IssueDetailComment }
-    >
-  >(() => new Map());
   const [classicQueuedDeliveryError, setClassicQueuedDeliveryError] =
     useState<string | null>(null);
   useEffect(() => {
@@ -1561,7 +1557,6 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   }, [issueId]);
   useEffect(() => {
     setLocalSteeringPlacements(new Map());
-    setLocalInterruptPlacements(new Map());
     setClassicQueuedDeliveryError(null);
   }, [issueId]);
   const hasLiveRuns = liveRunCount > 0 || !!resolvedActiveRun;
@@ -1666,23 +1661,14 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       }
     >();
 
+    const commentRevisions = new Map(comments.map(comment => [comment.id, new Date(comment.updatedAt).toISOString()]));
     for (const run of resolvedLinkedRuns) {
       agentIdByRunId.set(run.runId, run.agentId);
-      const batchedIds = Array.isArray(run.wakeCommentIds)
-        ? run.wakeCommentIds.filter(
-            (value): value is string =>
-              typeof value === "string" && value.length > 0,
-          )
-        : [];
-      const fallbackId =
-        typeof run.wakeCommentId === "string" && run.wakeCommentId.length > 0
-          ? run.wakeCommentId
-          : typeof run.contextCommentId === "string" &&
-              run.contextCommentId.length > 0
-            ? run.contextCommentId
-            : null;
-      const inputIds =
-        batchedIds.length > 0 ? batchedIds : fallbackId ? [fallbackId] : [];
+      // Wake IDs describe scheduling, not provider acceptance. Match the
+      // accepted revision so a later edit remains pending.
+      const inputIds = (run.acceptedCommentInputs ?? []).filter(input =>
+        commentRevisions.get(input.id) === input.updatedAt,
+      ).map(input => input.id);
       const anchorAt = run.startedAt ?? run.createdAt;
       const anchorMs = new Date(anchorAt).getTime();
       inputIds.forEach((commentId, sequence) => {
@@ -1781,7 +1767,6 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     const loadedCommentIds = new Set(comments.map((comment) => comment.id));
     for (const placement of [
       ...localSteeringPlacements.values(),
-      ...localInterruptPlacements.values(),
     ]) {
       if (placement.comment && !loadedCommentIds.has(placement.comment.id)) {
         commentsToProject.push(placement.comment);
@@ -1808,7 +1793,10 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
                 : null,
           }
         : activityMeta;
-      const inputPlacement = inputPlacementByCommentId.get(comment.id);
+      // An agent reply can be read as history in a later prompt. That receipt
+      // must not move the reply away from its original authoring turn.
+      const inputPlacement = comment.authorType === "agent" || comment.authorAgentId
+        ? undefined : inputPlacementByCommentId.get(comment.id);
       const submittedAtMs = new Date(comment.createdAt).getTime();
       // Older activity rows may predate the explicit followUpRequested flag.
       // A run-start input is a provable queued follow-up only when it was
@@ -2016,13 +2004,17 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     interactions,
     liveRunIds,
     localSteeringPlacements,
-    localInterruptPlacements,
     locallyQueuedCommentRunIds,
     queuedCommentReason,
     resolvedActivity,
     resolvedLinkedRuns,
     interruptibleIssueRun,
   ]);
+  useEffect(() => {
+    const ids = commentsWithRunMeta.filter(comment => comment.consumedByRunId).map(comment => comment.id);
+    if (ids.length) onConsumedQueuedComments?.(ids);
+  }, [commentsWithRunMeta, onConsumedQueuedComments]);
+
   const effectiveQueuedCommentQueue = useMemo(() => {
     if (!queuedCommentQueueEnabled) return null;
     const visibleAuthoritativeQueue = authoritativeQueuedCommentQueue
@@ -2039,7 +2031,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       if (
         consumedQueuedCommentIds.has(comment.id) ||
         discardedQueuedCommentIds.has(comment.id) ||
-        comment.steeredIntoRunId
+        comment.steeredIntoRunId || comment.consumedByRunId
       ) {
         return [];
       }
@@ -2082,12 +2074,6 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         return [
           {
             ...comment,
-            ...(!comment.consumedByRunId && localInterruptPlacements.has(comment.id)
-              ? {
-                  conversationAnchorAt: localInterruptPlacements.get(comment.id)!.anchorAt,
-                  conversationAnchorSequence: localInterruptPlacements.get(comment.id)!.sequence,
-                }
-              : {}),
             clientStatus: undefined,
             queueState: undefined,
             queueTargetRunId: null,
@@ -2099,7 +2085,6 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       commentsWithRunMeta,
       consumedQueuedCommentIds,
       discardedQueuedCommentIds,
-      localInterruptPlacements,
     ],
   );
 
@@ -2254,35 +2239,12 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
 
   const interruptQueuedComments = useCallback(
     async (runId: string | null) => {
-      const queuedComments = effectiveQueuedCommentQueue?.targetRunId === runId
-        ? effectiveQueuedCommentQueue.entries.map((entry) => entry.comment)
-        : commentsWithRunMeta.filter(
-            (comment) => comment.queueState === "queued" && comment.queueTargetRunId === runId,
-          );
-      const ids = queuedComments.map((comment) => comment.id);
-      const anchorAt = new Date().toISOString();
+      // Saving intent is not a delivery receipt. Keep every row until the
+      // server or the adapter acknowledges that exact input revision.
       setClassicQueuedDeliveryError(null);
-      setConsumedQueuedCommentIds((current) => new Set([...current, ...ids]));
-      setLocalInterruptPlacements((current) => {
-        const next = new Map(current);
-        queuedComments.forEach((comment, sequence) => {
-          next.set(comment.id, { anchorAt, sequence, comment });
-        });
-        return next;
-      });
       try {
         await onInterruptQueued(runId);
       } catch (error) {
-        setConsumedQueuedCommentIds((current) => {
-          const next = new Set(current);
-          for (const id of ids) next.delete(id);
-          return next;
-        });
-        setLocalInterruptPlacements((current) => {
-          const next = new Map(current);
-          for (const id of ids) next.delete(id);
-          return next;
-        });
         if (classicTaskInterfaceEnabled) {
           setClassicQueuedDeliveryError("Couldn’t interrupt. Message is still queued.");
           return;
@@ -3315,11 +3277,14 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     ? shouldTrackIssueActiveRun(issue) && hasActiveRun
     : hasActiveRun;
   const hasLiveRuns = liveRunCount > 0 || resolvedHasActiveRun;
-  useEffect(() => {
-    if (!hasLiveRuns && locallyQueuedCommentRunIds.size > 0) {
-      setLocallyQueuedCommentRunIds(new Map());
-    }
-  }, [hasLiveRuns, locallyQueuedCommentRunIds.size]);
+  const reconcileConsumedQueuedComments = useCallback((ids: string[]) => {
+    setLocallyQueuedCommentRunIds(current => {
+      if (!ids.some(id => current.has(id))) return current;
+      const next = new Map(current);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  }, []);
   const sourceBreadcrumb = useMemo(
     () =>
       readIssueDetailBreadcrumb(issueId, location.state, location.search) ?? {
@@ -7982,6 +7947,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                     void refetchWorkProducts();
                   }}
                   locallyQueuedCommentRunIds={locallyQueuedCommentRunIds}
+                  onConsumedQueuedComments={reconcileConsumedQueuedComments}
                   interactions={interactions}
                   documents={issue.documentSummaries ?? []}
                   workProducts={workProducts ?? []}

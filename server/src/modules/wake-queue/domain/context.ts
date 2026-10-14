@@ -107,6 +107,7 @@ export function enrichPromotedWakeContext(
   input: EnrichPromotedWakeContextInput,
 ): EnrichPromotedWakeContextResult {
   const contextSnapshot = { ...input.contextSnapshot };
+  delete contextSnapshot.acceptedCommentInputs;
   const { reason, source, triggerDetail, payload } = input;
   const commentIdFromPayload = readNonEmptyString(payload?.["commentId"]);
   const taskKey = deriveTaskKey(contextSnapshot, payload);

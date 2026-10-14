@@ -84,6 +84,7 @@ export function isQueuedIssueComment(params: {
     Partial<Pick<OptimisticIssueComment, "clientStatus">> & {
       id?: string;
       authorAgentId?: string | null;
+      consumedByRunId?: string | null;
     };
   activeRunStartedAt?: Date | string | null;
   activeRunAgentId?: string | null;
@@ -92,7 +93,7 @@ export function isQueuedIssueComment(params: {
   runId?: string | null;
   interruptedRunId?: string | null;
 }) {
-  if (params.runId) return false;
+  if (params.comment.consumedByRunId || params.runId) return false;
   if (params.interruptedRunId) return false;
   if (
     params.comment.id &&
@@ -108,7 +109,7 @@ export function isQueuedIssueComment(params: {
   return toTimestamp(params.comment.createdAt) >= toTimestamp(params.activeRunStartedAt);
 }
 
-export function applyLocalQueuedIssueCommentState<T extends IssueComment>(
+export function applyLocalQueuedIssueCommentState<T extends IssueComment & { consumedByRunId?: string | null }>(
   comment: T,
   params: {
     queuedTargetRunId?: string | null;
@@ -117,7 +118,7 @@ export function applyLocalQueuedIssueCommentState<T extends IssueComment>(
   },
 ): T | LocallyQueuedIssueComment<T> {
   const queuedTargetRunId = params.queuedTargetRunId ?? null;
-  if (!queuedTargetRunId || !params.targetRunIsLive) return comment;
+  if (comment.consumedByRunId || !queuedTargetRunId || !params.targetRunIsLive) return comment;
   if (params.runningRunId && params.runningRunId !== queuedTargetRunId) return comment;
 
   return {

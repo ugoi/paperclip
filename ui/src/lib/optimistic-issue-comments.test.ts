@@ -1015,3 +1015,15 @@ describe("optimistic issue comments", () => {
     expect(result).toBe(comment);
   });
 });
+
+describe("accepted queued inputs", () => {
+  it.each(["2026-10-13T07:38:25.811Z", "2026-10-13T07:38:25.812Z", "2026-10-13T07:38:26.000Z"])("never reimports a receipt at %s", createdAt => {
+    const comment = { ...createOptimisticIssueComment({ companyId: "company", issueId: "task", body: "accepted", authorUserId: "user", clientStatus: "queued" }), createdAt: new Date(createdAt), consumedByRunId: "receiving-run" };
+    expect(isQueuedIssueComment({ comment, activeRunStartedAt: "2026-10-13T07:38:25.812Z" })).toBe(false);
+    expect(applyLocalQueuedIssueCommentState(comment, { queuedTargetRunId: "old-run", targetRunIsLive: true, runningRunId: "old-run" })).toBe(comment);
+  });
+  it("preserves an unacknowledged input despite the same local state", () => {
+    const comment = createOptimisticIssueComment({ companyId: "company", issueId: "task", body: "unconfirmed", authorUserId: "user" });
+    expect(applyLocalQueuedIssueCommentState(comment, { queuedTargetRunId: "run", targetRunIsLive: true, runningRunId: "run" })).toMatchObject({ queueState: "queued" });
+  });
+});

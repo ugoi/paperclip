@@ -351,6 +351,7 @@ import {
 } from "../services/native-runtime/native-session-executor.js";
 import {
   buildQueuedCommentQueueSnapshot,
+  queuedCommentInterruptRequestedAt,
   decideQueuedCommentQueueSteering,
   queuedCommentIdsFromWakePayload,
   withQueuedCommentIdsInWakePayload,
@@ -369,6 +370,7 @@ const queuedCommentSteeringTargetSchema =
     targetRunId: z.string().min(1),
   });
 const queuedCommentInterruptTargetSchema = queuedCommentMutationTargetSchema.extend({
+  inputs: z.array(z.object({ id: z.string().min(1), updatedAt: z.string().datetime() })).min(1).optional(),
   targetRunId: z.string().min(1).nullable(),
 });
 const editQueuedCommentSchema = queuedCommentMutationTargetSchema.extend({
@@ -6853,7 +6855,7 @@ export function issueRoutes(
     id: string;
     assigneeAgentId: string | null;
     executionRunId?: string | null;
-  }) {
+  }, includePreparing = false) {
     let runToInterrupt = issue.executionRunId
       ? await heartbeat.getRun(issue.executionRunId)
       : null;
@@ -6883,7 +6885,7 @@ export function issueRoutes(
       }
     }
 
-    return runToInterrupt?.status === "running" ? runToInterrupt : null;
+    return runToInterrupt && (runToInterrupt.status === "running" || (includePreparing && runToInterrupt.status === "queued")) ? runToInterrupt : null;
   }
 
   type IssueQueueDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -7028,11 +7030,14 @@ export function issueRoutes(
       actorType: input.actor.actorType,
       actorId: input.actor.actorId,
     });
+    const intent = readObject(readObject(wake?.payload).queuedCommentInterrupt);
+
     if (wake && queuedInteractionId(wake.payload)) {
       const response = await readQueuedInteractionResponse(input.executor as Db, input.issue.companyId, input.issue.id, wake.payload);
       if (response?.source.requiresFreshSession) queue.steeringDisposition = "unsupported";
       queue.entries = response ? [{ comment: response.comment, source: response.source, position: 0, canEdit: false, canDiscard: false }] : [];
     }
+    queue.interruptRequestedAt = queuedCommentInterruptRequestedAt(intent, queue.entries.map(entry => entry.comment));
     return queue;
   }
 
@@ -7165,7 +7170,7 @@ export function issueRoutes(
       ? await (input.lockRun === false ? activeRunQuery : activeRunQuery.for("update"))
           .limit(1).then(rows => rows[0] ?? null)
       : null;
-    if (input.targetRunId) {
+    if (input.targetRunId && state === "deferred") {
       const runContext = readObject(activeRun?.contextSnapshot);
       if (
         !activeRun ||
@@ -15391,7 +15396,7 @@ export function issueRoutes(
     const queue = await buildQueuedCommentQueue({
       executor: db,
       issue,
-      activeRun: await resolveActiveIssueRun(issue),
+      activeRun: await resolveActiveIssueRun(issue, true),
       actor: getActorInfo(req),
     });
     res.json(
@@ -15478,43 +15483,55 @@ export function issueRoutes(
         }
       }
       const actor = getActorInfo(req);
-      const runToInterrupt = await db.transaction(async (tx) => {
+      await db.transaction(async (tx) => {
         const locked = await lockQueuedCommentState({
           tx, issue, actor, queueId: req.body.queueId, targetRunId: req.body.targetRunId ?? undefined,
           allowStoppedTarget: true,
         });
         assertQueueMutationTarget({ queue: locked.queue, queueId: req.body.queueId, revision: req.body.revision });
         const freshResponse = locked.queue.entries.some(entry => entry.source?.requiresFreshSession);
-        if ((locked.queue.protocol !== "legacy" && !freshResponse) || locked.state !== "deferred" ||
+        if ((locked.queue.protocol !== "legacy" && !freshResponse) ||
             !locked.queue.entries.length ||
             (locked.activeRun && locked.activeRun.agentId !== locked.wake.agentId)) {
           throw conflict("This queue does not support interruption");
         }
-        if (locked.activeRun && locked.activeRun.status !== "running" &&
-            !["succeeded", "failed", "timed_out", "interrupted", "cancelled"].includes(locked.activeRun.status)) {
-          throw conflict("The previous run has not stopped");
-        }
-        if (locked.activeRun?.status === "running" && locked.activeRun.id !== req.body.targetRunId) {
+        // queued -> deferred is a legal scheduling transition. Saving intent
+        // must not require a running target; the worker waits for that boundary.
+        if (locked.activeRun && locked.activeRun.id !== req.body.targetRunId) {
           throw conflict("The queued message targets a stale run", { code: "queued_comment_stale_target" });
         }
-        // The click is durable fresh user intent, including when the message
-        // predates a failed run's stop. Keep its content and original attribution.
+        const inputs = locked.queue.entries.map(entry => ({ id: entry.comment.id, updatedAt: new Date(entry.comment.updatedAt).toISOString() }));
+        const requestedInputs = req.body.inputs ?? inputs;
+        if (!requestedInputs.every((entry: { id: string; updatedAt: string }) => inputs.some(current => current.id === entry.id && current.updatedAt === entry.updatedAt))) {
+          throw conflict("The requested message revision is no longer queued", { code: "queued_comment_revision_conflict" });
+        }
+        const previousIntent = readObject(readObject(locked.wake.payload).queuedCommentInterrupt);
+        const targetRunId = locked.activeRun?.id ?? null;
+        const sameTarget = previousIntent.targetRunId === targetRunId;
+        const previousInputs = sameTarget && Array.isArray(previousIntent.inputs) ? previousIntent.inputs : [];
+        const retainedInputs = inputs.filter(current => previousInputs.some(value => {
+          const previous = readObject(value);
+          return previous.id === current.id && previous.updatedAt === current.updatedAt;
+        }));
+        // A retry of an older selection cannot revoke a newer saved request.
+        // Preserve only still-current revisions, and never transfer a stop claim
+        // to a different target. The task lock serializes concurrent requests.
+        const selectedInputs = inputs.filter(current => retainedInputs.includes(current) ||
+          requestedInputs.some((entry: { id: string; updatedAt: string }) => entry.id === current.id && entry.updatedAt === current.updatedAt));
         await tx.update(agentWakeupRequests).set({
           payload: { ...readObject(locked.wake.payload), queuedCommentInterrupt: {
-            actorId: actor.actorId, requestedAt: new Date().toISOString(),
+            ...(sameTarget ? previousIntent : {}),
+            actorId: actor.actorId,
+            requestedAt: retainedInputs.length && typeof previousIntent.requestedAt === "string"
+              ? previousIntent.requestedAt : new Date().toISOString(),
+            targetRunId,
+            inputs: selectedInputs,
           } },
           updatedAt: new Date(),
         }).where(eq(agentWakeupRequests.id, locked.wake.id));
-        return locked.activeRun?.status === "running" ? locked.activeRun.id : null;
       });
       // Never hold the issue lock while joining the adapter. Queue edits and
       // discards stay authoritative until the dispatcher claims the successor.
-      const options = operatorInterruptCancelOptions({ issueId: issue.id, actor });
-      if (runToInterrupt) await heartbeat.cancelRun(runToInterrupt, "Interrupted to send queued messages", {
-        ...options,
-        suppressImmediateRecovery: true,
-        resultJson: { ...options.resultJson, queuedCommentInterruptQueueId: req.body.queueId },
-      });
       await heartbeat.resumeQueuedCommentInterrupt(issue.companyId, req.body.queueId, { retryCleanup: true });
       await logActivity(db, {
         companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
@@ -15525,7 +15542,7 @@ export function issueRoutes(
       const currentIssue = await svc.getById(issue.id);
       const queue = await buildQueuedCommentQueue({
         executor: db, issue: currentIssue ?? issue,
-        activeRun: await resolveActiveIssueRun(currentIssue ?? issue), actor,
+        activeRun: await resolveActiveIssueRun(currentIssue ?? issue, true), actor,
       });
       res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, queue));
     },

@@ -52,6 +52,17 @@ export function withQueuedCommentIdsInWakePayload(
   return payload;
 }
 
+/** A revised/discarded selection must not leave an unfulfillable disabled button. */
+export function queuedCommentInterruptRequestedAt(intentValue: unknown, comments: Array<{ id: string; updatedAt: Date | string }>): string | null {
+  const intent = record(intentValue);
+  if (typeof intent.requestedAt !== "string") return null;
+  if (!Array.isArray(intent.inputs)) return intent.requestedAt; // earlier persisted board receipts
+  return comments.some(comment => (intent.inputs as unknown[]).some(value => {
+    const input = record(value);
+    return input.id === comment.id && input.updatedAt === new Date(comment.updatedAt).toISOString();
+  })) ? intent.requestedAt : null;
+}
+
 /**
  * Fingerprints one queued-comment queue: the wake id plus every comment's id
  * and last-updated time. A mutation that changes the queue changes this
@@ -91,6 +102,7 @@ export function withQueuedCommentIdsInRunContext(
 
   // These projections are generated immediately before dispatch. Any queue
   // mutation must force them to be rebuilt from the canonical comment ids.
+  delete context.acceptedCommentInputs;
   delete context.paperclipWake;
   delete context.paperclipWakeComment;
   delete context.paperclipTaskMarkdown;
@@ -186,6 +198,7 @@ export function buildQueuedCommentQueueSnapshot<TComment extends QueuedCommentQu
   steeringDisposition: IssueQueuedCommentQueue["steeringDisposition"];
   comments: TComment[];
   executionWait?: IssueQueuedCommentQueue["executionWait"];
+  interruptRequestedAt?: string | null;
   actorType: "agent" | "user";
   actorId: string;
 }): IssueQueuedCommentQueue {
@@ -198,6 +211,7 @@ export function buildQueuedCommentQueueSnapshot<TComment extends QueuedCommentQu
     protocol: facts.protocol,
     steeringDisposition: facts.steeringDisposition,
     ...(facts.executionWait ? { executionWait: facts.executionWait } : {}),
+    ...(facts.interruptRequestedAt ? { interruptRequestedAt: facts.interruptRequestedAt } : {}),
     entries: facts.comments.map((comment, position) => ({
       comment: comment as unknown as IssueComment,
       position,

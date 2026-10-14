@@ -1,3 +1,4 @@
+import { recordAcceptedCommentInputs } from "../services/comment-input-receipts.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { runningProcesses } from "../adapters/index.js";
 import { randomUUID } from "node:crypto";
@@ -6,6 +7,7 @@ import request from "supertest";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   agentRuntimeState,
   agentWakeupRequests,
   agents,
@@ -60,7 +62,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-queued-comments-");
     db = createDb(tempDb.connectionString);
-  }, 30_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   const testProcesses = new Map<string, ChildProcess>();
 
@@ -191,6 +193,127 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     })));
     return { companyId, agentId, issueId, runId, wakeId, commentIds };
   }
+
+  it("accepts one early interrupt against a preparing run and preserves it across service restart", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ status: "queued", runtimeMode: "legacy", startedAt: null }).where(eq(heartbeatRuns.id, seeded.runId));
+    const client = app(seeded.companyId);
+    const queue = (await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`).expect(200)).body;
+    await request(client).post(`/api/issues/${seeded.issueId}/queued-comments/interrupt`).send({ queueId: seeded.wakeId, revision: queue.revision, targetRunId: seeded.runId }).expect(200);
+    const [saved] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    expect(saved.payload?.queuedCommentInterrupt).toMatchObject({ targetRunId: seeded.runId, inputs: seeded.commentIds.map(id => ({ id })) });
+    await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId)))[0].status).toBe("queued");
+    expect((await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`)).body.interruptRequestedAt).toBe(saved.payload?.queuedCommentInterrupt.requestedAt);
+  });
+
+  it.each(["ready", "successor", "edited", "received"] as const)("replays saved early intent safely when %s", async scenario => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "codex_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ status: "queued", runtimeMode: "legacy", startedAt: null }).where(eq(heartbeatRuns.id, seeded.runId));
+    const client = app(seeded.companyId);
+    const queue = (await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`)).body;
+    await request(client).post(`/api/issues/${seeded.issueId}/queued-comments/interrupt`).send({ queueId: seeded.wakeId, revision: queue.revision, targetRunId: seeded.runId }).expect(200);
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const targetId = scenario === "successor" ? randomUUID() : seeded.runId;
+    testProcesses.set(targetId, child);
+    runningProcesses.set(targetId, { child, graceSec: 1, processGroupId: null });
+    await db.update(heartbeatRuns).set({ status: scenario === "successor" ? "succeeded" : "running", startedAt: new Date() }).where(eq(heartbeatRuns.id, seeded.runId));
+    if (scenario === "successor") {
+      await db.insert(heartbeatRuns).values({ id: targetId, companyId: seeded.companyId, agentId: seeded.agentId, runtimeMode: "legacy", status: "running", contextSnapshot: { issueId: seeded.issueId } });
+      await db.update(issues).set({ executionRunId: targetId }).where(eq(issues.id, seeded.issueId));
+    }
+    if (scenario === "edited") await db.update(issueComments).set({ updatedAt: new Date() });
+    if (scenario === "received") {
+      const inputs = queue.entries.map((entry: any) => ({ id: entry.comment.id, updatedAt: entry.comment.updatedAt }));
+      await recordAcceptedCommentInputs(db, { ...seeded, offered: inputs, accepted: inputs });
+    }
+    // Hold capacity on an unrelated fixture task; no real provider can launch.
+    await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId, status: "running", contextSnapshot: { issueId: randomUUID() } });
+    await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+    await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+    const [target] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, targetId));
+    expect(target.status).toBe(scenario === "ready" ? "cancelled" : "running");
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    if (scenario === "ready") {
+      // Ordinary finalization may promote this very wake while Stop settles.
+      expect(wake.status).toBe("queued");
+      expect(wake.runId).not.toBe(seeded.runId);
+      expect((await db.select().from(heartbeatRuns)).filter(run => run.status === "queued")).toHaveLength(1);
+    }
+    if (scenario === "received") expect(wake.status).toBe("coalesced");
+    if (scenario === "edited" || scenario === "successor") expect(wake.status).toBe("deferred_issue_execution");
+  });
+
+  it("allows a new request after all selected revisions changed, without hiding the edited messages", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "codex_local", status: "paused" }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", status: "queued", startedAt: null }).where(eq(heartbeatRuns.id, seeded.runId));
+    const client = app(seeded.companyId);
+    let queue = (await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`)).body;
+    await request(client).post(`/api/issues/${seeded.issueId}/queued-comments/interrupt`).send({ queueId: seeded.wakeId, revision: queue.revision, targetRunId: seeded.runId }).expect(200);
+    for (const id of seeded.commentIds) {
+      queue = (await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`)).body;
+      await request(client).patch(`/api/issues/${seeded.issueId}/queued-comments/${id}`)
+        .send({ queueId: seeded.wakeId, revision: queue.revision, body: "Edited direction" }).expect(200);
+    }
+    queue = (await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`)).body;
+    expect(queue.interruptRequestedAt).toBeNull();
+    expect(queue.entries).toHaveLength(2);
+    const response = await request(client).post(`/api/issues/${seeded.issueId}/queued-comments/interrupt`).send({ queueId: seeded.wakeId, revision: queue.revision, targetRunId: seeded.runId });
+    expect(response.status).toBe(200);
+    expect(response.body.interruptRequestedAt).toBeTruthy();
+  });
+
+  it("does not lose a newer selected input when an earlier interrupt request is retried", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "codex_local", status: "paused" }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", status: "queued", startedAt: null }).where(eq(heartbeatRuns.id, seeded.runId));
+    const client = app(seeded.companyId);
+    const queue = (await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`)).body;
+    const inputs = queue.entries.map((entry: any) => ({ id: entry.comment.id, updatedAt: entry.comment.updatedAt }));
+    const send = (input: typeof inputs[number]) => request(client)
+      .post(`/api/issues/${seeded.issueId}/queued-comments/interrupt`)
+      .send({ queueId: seeded.wakeId, revision: queue.revision, targetRunId: seeded.runId, inputs: [input] }).expect(200);
+    const first = await send(inputs[0]);
+    await send(inputs[1]);
+    await send(inputs[0]);
+    const [saved] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    expect(saved.payload?.queuedCommentInterrupt).toMatchObject({
+      targetRunId: seeded.runId, requestedAt: first.body.interruptRequestedAt, inputs,
+    });
+  });
+
+  it("accepts the public queued state without cancelling its own pending delivery run", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ status: "queued", runtimeMode: "legacy", startedAt: null, wakeupRequestId: seeded.wakeId }).where(eq(heartbeatRuns.id, seeded.runId));
+    await db.update(agentWakeupRequests).set({ status: "queued", runId: seeded.runId }).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    const client = app(seeded.companyId);
+    const queue = (await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`).expect(200)).body;
+    expect(queue.state).toBe("queued");
+    await request(client).post(`/api/issues/${seeded.issueId}/queued-comments/interrupt`).send({ queueId: seeded.wakeId, revision: queue.revision, targetRunId: null }).expect(200);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId)))[0].status).toBe("queued");
+  });
+
+  it("acknowledges context-only input revisions, pruning only received pending rows atomically", async () => {
+    const seeded = await seedQueue();
+    const comments = await db.select().from(issueComments);
+    const offered = comments.map(comment => ({ id: comment.id, updatedAt: comment.updatedAt.toISOString() }));
+    const input = { ...seeded, offered, accepted: [offered[0]!] };
+    await recordAcceptedCommentInputs(db, input);
+    await recordAcceptedCommentInputs(db, input);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    expect(run.contextSnapshot?.acceptedCommentInputs).toEqual([offered[0]]);
+    expect(run.contextSnapshot?.wakeCommentIds).toBeUndefined();
+    const queue = (await request(app(seeded.companyId)).get(`/api/issues/${seeded.issueId}/queued-comments`)).body;
+    expect(queue.entries.map((entry: any) => entry.comment.id)).toEqual(seeded.commentIds.filter(id => id !== offered[0].id));
+    await db.update(issueComments).set({ updatedAt: new Date("2026-10-14T00:00:00Z") }).where(eq(issueComments.id, offered[1].id));
+    await recordAcceptedCommentInputs(db, { ...input, accepted: [offered[1]!] });
+    const pending = (await request(app(seeded.companyId)).get(`/api/issues/${seeded.issueId}/queued-comments`)).body;
+    expect(pending.entries).toHaveLength(1); // The new revision was never accepted.
+  });
 
   it.each(["cancelled", "running"])("rejects a late Done from an interrupted %s task run at the write boundary", async status => {
     const seeded = await seedQueue();
@@ -810,9 +933,12 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await db.update(heartbeatRuns).set({ processPid: 999999999 }).where(eq(heartbeatRuns.id, seeded.runId));
     const excludedIndex = actorType === "consumed_last" ? 1 : 0;
     const filtersInput = ["consumed_first", "consumed_last", "deleted_first", "agent_first"].includes(actorType);
-    if (actorType.startsWith("consumed_")) await db.update(heartbeatRuns).set({
-      contextSnapshot: { issueId: seeded.issueId, wakeCommentIds: [seeded.commentIds[excludedIndex]] },
-    }).where(eq(heartbeatRuns.id, seeded.runId));
+    if (actorType.startsWith("consumed_")) {
+      const [received] = await db.select().from(issueComments).where(eq(issueComments.id, seeded.commentIds[excludedIndex]));
+      await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: seeded.issueId,
+        wakeCommentIds: [received.id], acceptedCommentInputs: [{ id: received.id, updatedAt: received.updatedAt.toISOString() }],
+      } }).where(eq(heartbeatRuns.id, seeded.runId));
+    }
     if (actorType === "deleted_first") await db.update(issueComments).set({ deletedAt: new Date() })
       .where(eq(issueComments.id, seeded.commentIds[0]));
     if (actorType === "agent_first") await db.update(issueComments).set({

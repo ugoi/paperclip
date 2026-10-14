@@ -418,6 +418,7 @@ export function activityService(db: Db) {
           continuationAttempt: heartbeatRuns.continuationAttempt,
           lastUsefulActionAt: heartbeatRuns.lastUsefulActionAt,
           nextAction: heartbeatRuns.nextAction,
+          acceptedCommentInputs: sql<Array<{ id: string; updatedAt: string }> | null>`${heartbeatRuns.contextSnapshot} -> 'acceptedCommentInputs'`,
           wakeCommentIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds'`,
           wakeCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`,
           contextCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'commentId'`,

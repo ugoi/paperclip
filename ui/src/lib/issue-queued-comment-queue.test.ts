@@ -170,3 +170,18 @@ describe("normalizeIssueQueuedCommentQueue", () => {
     ]);
   });
 });
+
+describe("receipt reconciliation and mixed queues", () => {
+  it("drops only received locals and keeps the server queue usable beside unknown locals", () => {
+    const authoritativeQueue = normalizeIssueQueuedCommentQueue({ queueId: "wake", revision: "revision", targetRunId: "new-run", protocol: "legacy", state: "deferred", entries: [{ comment: comment("server", "saved"), canDiscard: true }] }, "issue-1");
+    const merged = mergePendingIssueQueuedComments({ issueId: "issue-1", authoritativeQueue, fallbackProtocol: "legacy", pendingComments: [
+      { comment: { ...comment("received", "old"), consumedByRunId: "new-run" }, targetRunId: "old-run" },
+      { comment: comment("unknown", "keep me"), targetRunId: "old-run" },
+    ] });
+    expect(merged).toMatchObject({ queueId: "wake", revision: "revision", targetRunId: "new-run" });
+    expect(merged?.entries.map(entry => [entry.comment.id, !!entry.pending])).toEqual([["server", false], ["unknown", true]]);
+  });
+  it("retains a saved interrupt acknowledgement across normalization", () => {
+    expect(normalizeIssueQueuedCommentQueue({ interruptRequestedAt: "2026-10-14T17:00:00.000Z" }, "task").interruptRequestedAt).toBe("2026-10-14T17:00:00.000Z");
+  });
+});

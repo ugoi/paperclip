@@ -36,7 +36,7 @@ export async function undeliveredLegacyUserCommentIds(
   db: Db, companyId: string, issueId: string, agentId: string, commentIds: string[],
 ): Promise<string[]> {
   if (!commentIds.length) return [];
-  const comments = await db.select({ id: issueComments.id }).from(issueComments).where(and(
+  const comments = await db.select({ id: issueComments.id, updatedAt: issueComments.updatedAt }).from(issueComments).where(and(
     eq(issueComments.companyId, companyId), eq(issueComments.issueId, issueId),
     inArray(issueComments.id, commentIds), eq(issueComments.authorType, "user"),
     isNull(issueComments.createdByRunId), isNull(issueComments.deletedAt),
@@ -47,20 +47,14 @@ export async function undeliveredLegacyUserCommentIds(
   const previous = await db.select({ context: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
     sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
-    // A queued turn cancelled before dispatch has not consumed input, whatever
-    // cancelled it (pause, stale assignment, or rejected admission). Reserved
-    // native identity/process metadata is not proof that its prompt was sent.
-    // Admission separately verifies process termination before a new turn.
-    sql`not (${heartbeatRuns.status} = 'cancelled' and ${heartbeatRuns.startedAt} is null)`,
-    or(...commentIds.map(id => or(
-      sql`${heartbeatRuns.contextSnapshot}->>'wakeCommentId' = ${id}`,
-      sql`${heartbeatRuns.contextSnapshot}->'wakeCommentIds' @> ${JSON.stringify([id])}::jsonb`,
-    ))),
+    sql`${heartbeatRuns.contextSnapshot}->'acceptedCommentInputs' is not null`,
   ));
+  const revisions = new Map(comments.map(comment => [comment.id, comment.updatedAt.toISOString()]));
   for (const { context } of previous) {
-    if (typeof context?.wakeCommentId === "string") valid.delete(context.wakeCommentId);
-    if (Array.isArray(context?.wakeCommentIds)) {
-      for (const id of context.wakeCommentIds) if (typeof id === "string") valid.delete(id);
+    const inputs = context?.acceptedCommentInputs;
+    if (!Array.isArray(inputs)) continue;
+    for (const input of inputs) {
+      if (input && typeof input === "object" && revisions.get(input.id) === input.updatedAt) valid.delete(input.id);
     }
   }
   return commentIds.filter(id => valid.has(id));

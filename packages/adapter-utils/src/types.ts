@@ -237,6 +237,8 @@ export interface AgentRuntimeIdentity {
 export interface AdapterExecutionContext {
   /** Server-owned credentials. Never persist this object or merge it into config. */
   agentIdentity?: AgentRuntimeIdentity;
+  /** Provider-turn evidence, never prompt preparation or process spawn. */
+  onInputAccepted?: (inputs: Array<{ id: string; updatedAt: string }>) => Promise<void>;
   /** Synchronous, content-free diagnostic scope; never stop or collection authority. */
   onExecutionPhase?: AdapterExecutionPhaseSink;
   /** Run-scoped operator cancellation; adapters must settle before returning. */

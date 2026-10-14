@@ -29,21 +29,43 @@ describe("issuesApi.list", () => {
     mockApi.patch.mockResolvedValue({});
   });
 
-  it.each([null, "stopped-run"])("dispatches a stopped queue using its current revision (%s)", async (target) => {
-    mockApi.get.mockResolvedValueOnce({ queueId: "queue-1", targetRunId: null, revision: "revision-2" });
+  const inputs = [{ id: "message-1", updatedAt: "2026-10-14T10:00:00.000Z" }];
+  const savedQueue = { queueId: "queue-1", targetRunId: null, revision: "revision-2", entries: inputs.map(comment => ({ comment })) };
+  it.each([null, "stopped-run"])("dispatches a stopped queue using its current revision (%s)", async target => {
+    mockApi.get.mockResolvedValueOnce(savedQueue);
     await issuesApi.interruptLatestQueuedComments("issue-1", target);
     expect(mockApi.post).toHaveBeenCalledWith("/issues/issue-1/queued-comments/interrupt", {
-      queueId: "queue-1", targetRunId: null, revision: "revision-2",
+      queueId: "queue-1", targetRunId: target, revision: "revision-2", inputs,
     });
   });
 
-  it.each([
-    { queueId: null, targetRunId: null, revision: "empty" },
-    { queueId: "queue-1", targetRunId: "new-run", revision: "changed" },
-  ])("rejects a changed or empty queue before interruption", async queue => {
-    mockApi.get.mockResolvedValueOnce(queue);
+  it("rejects a successor before requesting interruption", async () => {
+    mockApi.get.mockResolvedValueOnce({ ...savedQueue, targetRunId: "new-run" });
     await expect(issuesApi.interruptLatestQueuedComments("issue-1", "old-run")).rejects.toThrow("queued messages changed");
     expect(mockApi.post).not.toHaveBeenCalled();
+  });
+
+  it("waits for publication and retries a revision race with the same selected inputs and target", async () => {
+    vi.useFakeTimers();
+    try {
+      mockApi.get.mockResolvedValueOnce({ queueId: null, targetRunId: null, entries: [] })
+        .mockResolvedValueOnce(savedQueue).mockResolvedValueOnce({ ...savedQueue, revision: "new-revision" });
+      mockApi.post.mockRejectedValueOnce(new ApiError("race", 409, { details: { code: "queued_comment_revision_conflict" } }));
+      const result = issuesApi.interruptLatestQueuedComments("issue-1", "original-run");
+      await vi.advanceTimersByTimeAsync(500);
+      await result;
+      expect(mockApi.post).toHaveBeenCalledTimes(2);
+      expect(mockApi.post).toHaveBeenLastCalledWith("/issues/issue-1/queued-comments/interrupt", {
+        queueId: "queue-1", revision: "new-revision", targetRunId: "original-run", inputs,
+      });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not retry an actual gate conflict", async () => {
+    mockApi.get.mockResolvedValueOnce(savedQueue);
+    mockApi.post.mockRejectedValueOnce(new ApiError("gate", 409, { code: "queue_blocked" }));
+    await expect(issuesApi.interruptLatestQueuedComments("issue-1", null)).rejects.toThrow("gate");
+    expect(mockApi.post).toHaveBeenCalledOnce();
   });
 
   it("fetches all pages of tasks created from the source without filtering parentage", async () => {

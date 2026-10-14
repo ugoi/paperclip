@@ -985,6 +985,8 @@ export type IssueQueuedCommentSteeringDisposition =
   | "temporarily_unavailable";
 
 export interface IssueQueuedCommentEntry {
+  /** Client-only optimistic entry; never included in authoritative queue mutations. */
+  pending?: boolean;
   /** Immutable response projected from its durable interaction receipt. */
   source?: {
     kind: "interaction";
@@ -1016,6 +1018,8 @@ export interface IssueQueuedCommentQueue {
   entries: IssueQueuedCommentEntry[];
   /** Current admission condition for a saved user continuation. */
   executionWait?: { reason: string; message: string } | null;
+  /** Acknowledges durable intent, not delivery of the queued input. */
+  interruptRequestedAt?: string | null;
 }
 
 interface IssueCommentMetadataRowBase {

@@ -44,7 +44,7 @@ export function reorderQueuedMessageEntries(
   activeId: string,
   overId: string,
 ) {
-  if (entries.some((entry) => entry.source?.kind === "interaction")) return null;
+  if (entries.some((entry) => entry.pending || entry.source?.kind === "interaction")) return null;
   const from = entries.findIndex((entry) => entry.comment.id === activeId);
   const to = entries.findIndex((entry) => entry.comment.id === overId);
   if (from < 0 || to < 0 || from === to) return null;
@@ -150,7 +150,7 @@ function SortableQueuedMessage({
         <button
           type="button"
           onClick={onInterrupt}
-          disabled={busy || !queue.queueId || !onInterrupt}
+          disabled={busy || !!queue.interruptRequestedAt || !onInterrupt}
           title={queue.targetRunId ? "Interrupt the active turn and send queued messages" : "Send queued messages now"}
           className="flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
           data-testid={`task-chat-queued-interrupt-${entry.comment.id}`}
@@ -160,7 +160,7 @@ function SortableQueuedMessage({
           ) : (
             <CornerDownRight className="h-3.5 w-3.5" aria-hidden />
           )}
-          Interrupt
+          {queue.interruptRequestedAt ? "Interrupt requested" : "Interrupt"}
         </button>
       ) : (
         <button
@@ -185,7 +185,7 @@ function SortableQueuedMessage({
         onClick={onDiscard}
         disabled={
           busy ||
-          (!queue.queueId && !entry.comment.id.startsWith("optimistic-")) ||
+          ((!queue.queueId || entry.pending) && !entry.comment.id.startsWith("optimistic-")) ||
           !entry.canDiscard
         }
         title="Discard queued message"
@@ -316,9 +316,8 @@ export function TaskChatQueuedMessages({
     ) {
       return;
     }
-    const deliveredIds = action === "interrupt"
-      ? entries.map((entry) => entry.comment.id)
-      : action === "steer" ? [commentId] : [];
+    // Acknowledged interrupt intent is still waiting input, not delivery.
+    const deliveredIds = action === "steer" ? [commentId] : [];
     for (const id of deliveredIds) optimisticDeliveryIds.current.add(id);
     if (deliveredIds.length) {
       setEntries((current) => current.filter(
@@ -331,7 +330,7 @@ export function TaskChatQueuedMessages({
       action === "steer"
         ? "Steering queued message."
         : action === "interrupt"
-          ? "Sending queued messages."
+          ? "Requesting interruption."
           : "Discarding queued message.",
     );
     try {
@@ -397,7 +396,7 @@ export function TaskChatQueuedMessages({
             const action =
               pending?.commentId === entry.comment.id ? pending.action : null;
             const busy = Boolean(pending || reordering);
-            const queueMutationDisabled = Boolean(
+            const queueMutationDisabled = Boolean(entry.pending || queue.entries.some(candidate => candidate.pending) ||
               !queue.queueId || pending || reordering,
             );
             return (

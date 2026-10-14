@@ -179,6 +179,9 @@ async function runExecutor(
     runtimeMcp?: AdapterRuntimeMcpAccess;
     prepareRemoteManagedHome?: AcpxEngineExecutorOptions["prepareRemoteManagedHome"];
     startupTraceContext?: AdapterExecutionContext["startupTraceContext"];
+    onInputAccepted?: AdapterExecutionContext["onInputAccepted"];
+    createRuntime?: AcpxEngineExecutorOptions["createRuntime"];
+    expectedExitCode?: number;
   } = {},
 ) {
   // Skill reconciliation must never inspect or modify the developer's real
@@ -200,8 +203,9 @@ async function runExecutor(
     ...(options.prepareRemoteManagedHome
       ? { prepareRemoteManagedHome: options.prepareRemoteManagedHome }
       : {}),
-    createRuntime: (options) => {
-      runtimeOptions.push(options as unknown as Record<string, unknown>);
+    createRuntime: (runtimeConfig) => {
+      runtimeOptions.push(runtimeConfig as unknown as Record<string, unknown>);
+      if (options.createRuntime) return options.createRuntime(runtimeConfig);
       return buildRuntime(
         ({ key, value }) => configOptions.push({ key, value }),
         (input) => sessionInputs.push(input),
@@ -219,6 +223,8 @@ async function runExecutor(
       runtime: options.runtime ?? {},
       config,
       context: options.context ?? {},
+      executionContinuation: options.context?.executionContinuation,
+      onInputAccepted: options.onInputAccepted,
       executionTransport: options.executionTransport,
       authToken: options.authToken,
       agentIdentity: options.agentIdentity,
@@ -237,7 +243,7 @@ async function runExecutor(
     onUsage: async (receipt: unknown) => { receipts.push(receipt); },
   } as never);
 
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode).toBe(options.expectedExitCode ?? 0);
   return { logs, meta, events, receipts, runtimeOptions, configOptions, sessionInputs, turnInputs, result };
 }
 
@@ -392,6 +398,32 @@ const ALLOWED_TURN_SPAN_ATTRIBUTE_KEYS = new Set<string>([
 ]);
 
 describe("shared ACPX engine runtime behavior", () => {
+  it("receipts the exact rendered revisions only after a provider turn completes", async () => {
+    const root = await makeTempRoot();
+    const context = createPromptContextFixture();
+    const accepted = vi.fn();
+    await runExecutor({ agent: "claude", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") }, { context, onInputAccepted: accepted });
+    expect(accepted).toHaveBeenCalledTimes(1);
+    expect(accepted).toHaveBeenCalledWith(context.executionContinuation.messages.map(({ id, updatedAt }) => ({ id, updatedAt })));
+  });
+
+  it.each([false, true])("requires actual turn output before receipting a cancelled turn: output=%s", async withOutput => {
+    const root = await makeTempRoot();
+    const accepted = vi.fn();
+    const context = createPromptContextFixture();
+    await runExecutor({ agent: "claude", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") }, {
+      context, onInputAccepted: accepted, expectedExitCode: 1, createRuntime: () => ({
+        ...buildRuntime(), startTurn: () => ({
+          events: (async function* () {
+            if (withOutput) yield { type: "text_delta", text: "Accepted turn" };
+            yield { type: "done", stopReason: "cancelled" };
+          })(), result: Promise.resolve({ status: "cancelled", stopReason: "cancelled" }), cancel: async () => {},
+        }),
+      } as never),
+    });
+    expect(accepted).toHaveBeenCalledTimes(withOutput ? 1 : 0);
+  });
+
   it("integrates the env-free store while delivering current credentials and options to the provider", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

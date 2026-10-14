@@ -5,6 +5,7 @@ import { buildAgentIdentityEnv } from "@paperclipai/adapter-utils/server-utils";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
+import { recordAcceptedCommentInputs } from "./comment-input-receipts.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
 import { nativeRetryCancellationCommitCondition, rethrowNativeCancellationLockConflict, claimCancellationRequest, startupCancellationFence } from "./native-runtime/native-cancellation-request.js";
@@ -7244,6 +7245,7 @@ function enrichWakeContextSnapshot(input: {
   payload: Record<string, unknown> | null;
 }) {
   const { contextSnapshot, reason, source, triggerDetail, payload } = input;
+  delete contextSnapshot.acceptedCommentInputs;
   const issueIdFromPayload =
     readNonEmptyString(payload?.["issueId"]) ??
     readNonEmptyString(payload?.["taskId"]);
@@ -10574,13 +10576,70 @@ export function heartbeatService(
     if (!actorId) return;
     const agent = await getAgent(wake.agentId);
     if (!agent || agent.companyId !== companyId || (agent.adapterType === "paperclip_runner" && !response?.source.requiresFreshSession)) return;
-    const [active] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    if (interrupted && !response) {
+      const intent = parseObject(payload.queuedCommentInterrupt);
+      const requested = Array.isArray(intent.inputs) ? intent.inputs : null;
+      if (requested) {
+        const comments = await db.select({ id: issueComments.id, updatedAt: issueComments.updatedAt })
+          .from(issueComments).where(and(eq(issueComments.companyId, companyId),
+            eq(issueComments.issueId, issueId), inArray(issueComments.id, commentIds), isNull(issueComments.deletedAt)));
+        commentIds = commentIds.filter(id => comments.some(comment => comment.id === id &&
+          requested.some(input => input?.id === id && input?.updatedAt === comment.updatedAt.toISOString())));
+      }
+      commentIds = await undeliveredLegacyUserCommentIds(db, companyId, issueId, wake.agentId, commentIds);
+      if (!commentIds.length) return;
+    }
+    const [task] = await db.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
+    if (!task || task.assigneeAgentId !== wake.agentId || ["done", "cancelled"].includes(task.status) ||
+        ["paused", "terminated"].includes(agent.status) || (await getSchedulingSuppression()).suppressed ||
+        await treeControlSvc.getActivePauseHoldGate(companyId, issueId)) return;
+    const [active] = await db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
       eq(heartbeatRuns.agentId, wake.agentId),
       sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
       inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
     )).limit(1);
-    if (active) return;
+    if (active) {
+      const intent = parseObject(payload.queuedCommentInterrupt);
+      // A saved click never acquires authority over a successor. If the
+      // original target is still preparing, keep the intent for the sweep.
+      if (!interrupted || active.status !== "running" || intent.targetRunId !== active.id) return;
+      const stopClaimed = await db.transaction(async tx => {
+        const [lockedTask] = await tx.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, companyId))).for("update");
+        const [current] = await tx.select().from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.id, queueId), eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, wake.agentId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        )).for("update");
+        const currentIntent = parseObject(current?.payload?.queuedCommentInterrupt);
+        if (!lockedTask || lockedTask.assigneeAgentId !== wake.agentId || ["done", "cancelled"].includes(lockedTask.status) ||
+            !current || currentIntent.targetRunId !== active.id || currentIntent.actorId !== actorId) return false;
+        if (!response) {
+          const requested = Array.isArray(currentIntent.inputs) ? currentIntent.inputs : [];
+          const candidates = await tx.select({ id: issueComments.id, updatedAt: issueComments.updatedAt }).from(issueComments).where(and(
+            eq(issueComments.companyId, companyId), eq(issueComments.issueId, issueId),
+            inArray(issueComments.id, queuedCommentIdsFromWakePayload(current.payload)), isNull(issueComments.deletedAt),
+          ));
+          const selected = candidates.filter(comment => requested.some(input =>
+            input?.id === comment.id && input?.updatedAt === comment.updatedAt.toISOString())).map(comment => comment.id);
+          if (!(await undeliveredLegacyUserCommentIds(tx as unknown as Db, companyId, issueId, wake.agentId, selected)).length) return false;
+        }
+        // Linearize stop authority against edits/receipts; join the provider
+        // only after releasing the task lock. It remains bound to this run ID.
+        await tx.update(agentWakeupRequests).set({ payload: { ...current.payload, queuedCommentInterrupt: {
+          ...currentIntent, stopRequestedAt: currentIntent.stopRequestedAt ?? new Date().toISOString(),
+        } } }).where(eq(agentWakeupRequests.id, queueId));
+        return true;
+      });
+      if (!stopClaimed) return;
+      await cancelRunInternal(active.id, "Interrupted to send queued messages", {
+        errorCode: "operator_interrupted", suppressImmediateRecovery: true,
+        resultJson: { operatorInterrupted: true, interruptionSource: "issue_comment_interrupt",
+          interruptedIssueId: issueId, interruptedByActorType: "user", interruptedByActorId: actorId,
+          queuedCommentInterruptQueueId: queueId },
+        eventMessage: "run interrupted by saved board comment intent",
+        eventPayload: { issueId, queueId, source: "issue_comment_interrupt", interruptedByActorType: "user", interruptedByActorId: actorId },
+      });
+    }
     if (interrupted && opts?.retryCleanup) {
       // Only the HTTP click grants an extra cleanup attempt. Periodic retries
       // reuse the intent to deliver, never a fresh provider teardown budget.
@@ -25134,6 +25193,16 @@ export function heartbeatService(
                     runtimeTools,
                     onLog,
                     onMeta: onAdapterMeta,
+                    onInputAccepted: async (inputs) => {
+                      if (!issueId) return;
+                      const accepted = await recordAcceptedCommentInputs(db, {
+                        companyId: run.companyId, agentId: agent.id, runId: run.id, issueId,
+                        offered: [...executionContinuation?.messages ?? [], ...executionContinuation?.resumeDelta?.messages ?? []], accepted: inputs,
+                      });
+                      if (!accepted.length) return;
+                      context.acceptedCommentInputs = accepted;
+                      await appendRunEvent(currentRun, { eventType: "input.accepted", payload: { inputs: accepted } });
+                    },
                     onEvent: onAdapterEvent,
                     onUsage: async receipt => { await usageRecorder.capture(receipt); },
                     onExecutionPhase: executionControl.phases.enter,
@@ -27656,6 +27725,20 @@ export function heartbeatService(
               payload = { ...payload, manualUserWake: true };
               operatorResponsibleUserId = opts.requestedByActorId!;
             }
+            if (opts.queuedCommentInterruptId && !await readQueuedInteractionResponse(tx as unknown as Db, agent.companyId, issueId, pending.payload)) {
+              // Revalidate the saved revision under the admission lock, after
+              // asynchronous Stop/cleanup. An edit is not the old click's input.
+              const intent = parseObject(parseObject(pending.payload).queuedCommentInterrupt);
+              const requested = Array.isArray(intent.inputs) ? intent.inputs : null;
+              const candidates = await tx.select({ id: issueComments.id, updatedAt: issueComments.updatedAt }).from(issueComments).where(and(
+                eq(issueComments.companyId, agent.companyId), eq(issueComments.issueId, issueId),
+                inArray(issueComments.id, queuedCommentIdsFromWakePayload(pending.payload)), isNull(issueComments.deletedAt),
+              ));
+              const selected = candidates.filter(comment => !requested || requested.some(input =>
+                input?.id === comment.id && input?.updatedAt === comment.updatedAt.toISOString())).map(comment => comment.id);
+              const undelivered = await undeliveredLegacyUserCommentIds(tx as unknown as Db, agent.companyId, issueId, agentId, selected);
+              if (!undelivered.length) return { kind: "deferred" as const };
+            }
             if (opts.queuedCommentInterruptId) {
               // The locked board receipt supplies execution authority even when
               // another user authored the messages. Dispatch revalidates the receipt.
@@ -28917,7 +29000,7 @@ export function heartbeatService(
               ...queuedCommentIdsFromRunContext(enrichedContextSnapshot),
             ]),
           ];
-          if (opts.queuedCommentRequestId || handoffSource) {
+          if (opts.queuedCommentRequestId || opts.queuedCommentInterruptId || handoffSource) {
             adoptedCommentIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
               agent.companyId, issueId, agentId, adoptedCommentIds);
           }

@@ -391,16 +391,37 @@ export const issuesApi = {
     ),
   interruptQueuedComments: (
     id: string,
-    data: { queueId: string; targetRunId: string | null; revision: string },
+    data: { queueId: string; targetRunId: string | null; revision: string; inputs?: Array<{ id: string; updatedAt: string }> },
   ) => api.post<IssueQueuedCommentQueue>(`/issues/${id}/queued-comments/interrupt`, data),
   interruptLatestQueuedComments: async (id: string, expectedTargetRunId: string | null): Promise<IssueQueuedCommentQueue> => {
-    const queue = await issuesApi.getQueuedComments(id);
-    if (!queue.queueId || (queue.targetRunId && queue.targetRunId !== expectedTargetRunId)) {
-      throw new Error("The queued messages changed. Refresh and try again.");
+    // A click during the comment POST/queue publication race remains pending.
+    // Only a successful POST acknowledges durable intent; never rebind its
+    // stop authority to whichever successor happens to be running on a retry.
+    const deadline = Date.now() + 30_000;
+    let selected: { queueId: string; inputs: Array<{ id: string; updatedAt: string }> } | null = null;
+    for (;;) {
+      const queue = await issuesApi.getQueuedComments(id);
+      if (queue.targetRunId && queue.targetRunId !== expectedTargetRunId) {
+        throw new Error("The queued messages changed. Interrupt was not acknowledged.");
+      }
+      if (queue.queueId && queue.entries.length) {
+        selected ??= { queueId: queue.queueId, inputs: queue.entries.map(entry => ({ id: entry.comment.id, updatedAt: new Date(entry.comment.updatedAt).toISOString() })) };
+        if (queue.queueId !== selected.queueId || !selected.inputs.every(input => queue.entries.some(entry => entry.comment.id === input.id && new Date(entry.comment.updatedAt).toISOString() === input.updatedAt))) {
+          throw new Error("The selected message revision is no longer queued. Interrupt was not acknowledged.");
+        }
+        try {
+          return await issuesApi.interruptQueuedComments(id, {
+            queueId: queue.queueId, revision: queue.revision, targetRunId: expectedTargetRunId, inputs: selected.inputs,
+          });
+        } catch (error) {
+          const body = error instanceof ApiError ? error.body as { code?: string; details?: { code?: string } } | null : null;
+          if (!(error instanceof ApiError) || error.status !== 409 ||
+              (body?.code ?? body?.details?.code) !== "queued_comment_revision_conflict" || Date.now() >= deadline) throw error;
+        }
+      }
+      if (Date.now() >= deadline) throw new Error("Interrupt was not acknowledged. Your message remains saved; please retry.");
+      await new Promise(resolve => setTimeout(resolve, 250));
     }
-    return issuesApi.interruptQueuedComments(id, {
-      queueId: queue.queueId, revision: queue.revision, targetRunId: queue.targetRunId,
-    });
   },
   steerQueuedComment: (
     id: string,

@@ -88,6 +88,7 @@ export function normalizeIssueQueuedCommentQueue(
         ? (disposition as IssueQueuedCommentSteeringDisposition)
         : "unsupported",
     entries,
+    interruptRequestedAt: typeof source?.interruptRequestedAt === "string" ? source.interruptRequestedAt : null,
     executionWait: typeof wait?.reason === "string" && typeof wait?.message === "string"
       ? { reason: wait.reason, message: wait.message }
       : null,
@@ -95,16 +96,15 @@ export function normalizeIssueQueuedCommentQueue(
 }
 
 export interface PendingIssueQueuedComment {
-  comment: IssueComment;
+  comment: IssueComment & { consumedByRunId?: string | null };
   targetRunId: string | null;
 }
 
 /**
  * Keeps a just-submitted follow-up in the composer queue while the comment and
  * queue endpoints acknowledge it independently. If the server has not yet
- * included every local entry, queue mutations are withheld by clearing the
- * queue id; local discard remains available through the optimistic comment
- * cancellation path.
+ * included every local entry, retain those rows separately from the server
+ * queue. A local pending row cannot invalidate the server's identity/revision.
  */
 export function mergePendingIssueQueuedComments(params: {
   issueId: string;
@@ -117,19 +117,19 @@ export function mergePendingIssueQueuedComments(params: {
     authoritativeEntries.map((entry) => entry.comment.id),
   );
   const pendingEntries = params.pendingComments
-    .filter(({ comment }) => !authoritativeIds.has(comment.id))
+    .filter(({ comment }) => !comment.consumedByRunId && !authoritativeIds.has(comment.id))
     .map(({ comment }, position) => ({
       comment,
       position: authoritativeEntries.length + position,
       canEdit: false,
       canDiscard: true,
+      pending: true,
     }));
   const entries = [...authoritativeEntries, ...pendingEntries].map(
     (entry, position) => ({ ...entry, position }),
   );
   if (entries.length === 0) return null;
 
-  const queueAcknowledged = pendingEntries.length === 0;
   const authoritativeOwnsQueue = Boolean(params.authoritativeQueue?.queueId);
   const fallbackTargetRunId =
     params.pendingComments.find((entry) => entry.targetRunId)?.targetRunId ??
@@ -145,9 +145,7 @@ export function mergePendingIssueQueuedComments(params: {
 
   return {
     issueId: params.authoritativeQueue?.issueId ?? params.issueId,
-    queueId: queueAcknowledged
-      ? (params.authoritativeQueue?.queueId ?? null)
-      : null,
+    queueId: params.authoritativeQueue?.queueId ?? null,
     state:
       params.authoritativeQueue?.state ?? (targetRunId ? "deferred" : null),
     targetRunId,
@@ -160,5 +158,6 @@ export function mergePendingIssueQueuedComments(params: {
         : "unsupported"),
     entries,
     executionWait: params.authoritativeQueue?.executionWait ?? null,
+    interruptRequestedAt: params.authoritativeQueue?.interruptRequestedAt ?? null,
   };
 }

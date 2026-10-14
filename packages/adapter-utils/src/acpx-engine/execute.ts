@@ -1,3 +1,4 @@
+import { renderedCommentInputs } from "../comment-input-receipts.js";
 import { cancellableSandboxStartup } from "./startup-cancellation.js";
 import { withAdapterExecutionPhase, type AdapterExecutionPhase } from "../execution-phase.js";
 import fs from "node:fs/promises";
@@ -4930,11 +4931,23 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         status: "cancelled",
         stopReason: "paperclip_duplex_loss_deadline",
       };
+      const inputRevisions = renderedCommentInputs(ctx.executionContinuation, resumedSession);
+      let inputAcknowledged = false;
+      const acknowledgeInput = async () => {
+        if (inputAcknowledged) return;
+        await ctx.onInputAccepted?.(inputRevisions);
+        inputAcknowledged = true;
+      };
       const stepEventRelay = async (): Promise<AcpRuntimeTurnResult> => {
         const turn = activeTurn as AcpRuntimeTurn;
         const toolTitles = new Map<string, string>();
         const drainEvents = (async (): Promise<void> => {
           for await (const event of turn.events) {
+            // Turn-local provider output proves that this prompt was accepted.
+            // Status/session setup and prompt metadata do not.
+            if (event.type === "text_delta" || (event.type === "tool_call" && event.tag !== "tool_call_update")) {
+              await acknowledgeInput();
+            }
             lastRuntimeEventAt = now();
             observedRuntimeEvents += 1;
             // ACPX currently flattens client-side filesystem/terminal receipts
@@ -4993,7 +5006,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         // `turn.result` settles only when the agent's provider process
         // returns or rejects; a latched loss that armed the deadline after
         // the event drain already ended must still bound this wait.
-        return await Promise.race([turn.result, lossDeadline.then(() => LOSS_DEADLINE_TERMINAL)]);
+        const result = await Promise.race([turn.result, lossDeadline.then(() => LOSS_DEADLINE_TERMINAL)]);
+        if (result.status === "completed") await acknowledgeInput();
+        return result;
       };
       const stepTurnFinalize = async (
         input: TurnFinalizeInput<AcpRuntimeTurnResult>,

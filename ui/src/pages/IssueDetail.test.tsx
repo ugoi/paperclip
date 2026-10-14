@@ -3376,7 +3376,7 @@ describe("IssueDetail", () => {
     expect(freshComment?.queueState).toBeUndefined();
   });
 
-  it.each(["missing_activity", "conflicting_activity"])(
+  it.each(["missing_activity", "conflicting_activity", "later_context_receipt"])(
     "keeps the persisted authoring run for private Board replies: %s",
     async (mode) => {
       mockIssuesApi.get.mockResolvedValue(
@@ -3417,6 +3417,13 @@ describe("IssueDetail", () => {
           },
           logBytes: 1,
         },
+        ...(mode === "later_context_receipt" ? [{
+          runId: "later-reader", agentId: "agent-1", agentName: "Runner",
+          adapterType: "codex_local", status: "succeeded",
+          createdAt: "2026-04-21T01:00:00.000Z", startedAt: "2026-04-21T01:00:00.000Z",
+          contextIssueId: "issue-1", logBytes: 1,
+          acceptedCommentInputs: [{ id: "private-board-answer", updatedAt: new Date(createIssueComment().updatedAt).toISOString() }],
+        }] : []),
       ]);
       if (mode === "conflicting_activity") {
         mockActivityApi.forIssue.mockResolvedValue([
@@ -3456,6 +3463,9 @@ describe("IssueDetail", () => {
         runAgentId: "agent-1",
         interruptedRunId: null,
       });
+      const authored = props.comments?.find(comment => comment.id === "private-board-answer");
+      expect(authored?.consumedByRunId).toBeUndefined();
+      expect(authored?.conversationAnchorAt).toBeUndefined();
       expect(
         props.comments?.find(
           (comment) => comment.id === "distinct-human-answer",
@@ -3498,6 +3508,7 @@ describe("IssueDetail", () => {
         finishedAt: "2026-04-21T00:01:04.000Z",
         wakeCommentId: "comment-follow-up",
         wakeCommentIds: ["comment-follow-up"],
+        acceptedCommentInputs: [{ id: "comment-follow-up", updatedAt: "2026-04-21T00:00:30.000Z" }],
         contextCommentId: "comment-follow-up",
         contextIssueId: "issue-1",
         logBytes: 1,
@@ -3562,6 +3573,7 @@ describe("IssueDetail", () => {
         finishedAt: "2026-04-21T00:01:04.000Z",
         wakeCommentId: "comment-ordinary",
         wakeCommentIds: ["comment-ordinary"],
+        acceptedCommentInputs: [{ id: "comment-ordinary", updatedAt: "2026-04-21T00:00:30.000Z" }],
         contextCommentId: "comment-ordinary",
         contextIssueId: "issue-1",
         logBytes: 1,
@@ -3641,6 +3653,7 @@ describe("IssueDetail", () => {
         finishedAt: "2026-04-21T00:01:14.000Z",
         wakeCommentId: "comment-follow-up",
         wakeCommentIds: ["comment-follow-up"],
+        acceptedCommentInputs: [{ id: "comment-follow-up", updatedAt: "2026-04-21T00:00:30.000Z" }],
         contextCommentId: "comment-follow-up",
         contextIssueId: "issue-1",
         logBytes: 1,
@@ -4029,6 +4042,7 @@ describe("IssueDetail", () => {
 
     expect(mockIssuesApi.interruptQueuedComments).toHaveBeenCalledWith("PAP-1", {
       queueId: "wake-queue-1", revision: "queue-revision-1", targetRunId: "run-queued",
+      inputs: expect.any(Array),
     });
     expect(mockHeartbeatsApi.cancel).not.toHaveBeenCalled();
   });
@@ -6163,7 +6177,7 @@ describe("IssueDetail", () => {
 
   it.each([
     ["success", true], ["failure", true], ["success", false], ["failure", false],
-  ] as const)("optimistically promotes the interrupt queue with no toast on %s (history loaded: %s)", async (outcome, historyLoaded) => {
+  ] as const)("retains unreceived inputs after interrupt %s (history loaded: %s)", async (outcome, historyLoaded) => {
     const queue = createQueuedCommentQueue({ protocol: "legacy", steeringDisposition: "unsupported" });
     queue.entries.push({ ...queue.entries[0], position: 1, comment: createIssueComment({ id: "queued-comment-2", body: "Second direction" }) });
     mockIssuesApi.get.mockResolvedValue(createIssue({ status: "in_progress", assigneeAgentId: "agent-1", executionRunId: "run-active-1" }));
@@ -6187,10 +6201,8 @@ describe("IssueDetail", () => {
     let pending!: Promise<unknown>;
     await act(async () => { pending = props.onInterruptQueued("run-active-1").catch(error => error); });
     const whilePending = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as Props;
-    expect(whilePending.queuedCommentQueue).toBeNull();
-    for (const entry of queue.entries) expect(whilePending.comments).toContainEqual(expect.objectContaining({
-      id: entry.comment.id, queueState: undefined, conversationAnchorAt: expect.any(String),
-    }));
+    expect(whilePending.queuedCommentQueue?.entries).toHaveLength(2);
+    expect(whilePending.comments.some(comment => comment.conversationAnchorAt)).toBe(false);
     expect(mockPushToast).not.toHaveBeenCalled();
     await act(async () => {
       if (outcome === "failure") delivery.reject(new Error("Connection lost"));
@@ -6199,13 +6211,13 @@ describe("IssueDetail", () => {
     });
     await waitForAssertion(() => {
       const final = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as Props;
-      if (outcome === "failure") expect(final.queuedCommentQueue?.entries).toHaveLength(2);
-      else expect(final.queuedCommentQueue).toBeNull();
+      // An HTTP acknowledgement does not establish provider acceptance.
+      expect(final.queuedCommentQueue?.entries).toHaveLength(2);
     });
     expect(mockPushToast).not.toHaveBeenCalled();
   });
 
-  it("restores a failed classic interrupt inline without a toast or an unhandled rejection", async () => {
+  it("retains a failed classic interrupt inline without a toast or an unhandled rejection", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: true, enableClassicTaskInterface: true });
     mockIssuesApi.get.mockResolvedValue(createIssue({ status: "in_progress", assigneeAgentId: "agent-1", executionRunId: "run-active-1" }));
     mockAgentsApi.list.mockResolvedValue([createAgent({ adapterType: "codex_local" })]);
@@ -6227,7 +6239,7 @@ describe("IssueDetail", () => {
     });
     let pending!: Promise<unknown>;
     await act(async () => { pending = props.onInterruptQueued("run-active-1").catch(error => error); });
-    expect(mockIssueChatThreadRender.mock.calls.at(-1)?.[0]?.comments).toContainEqual(expect.objectContaining({ id: "queued-comment-1", queueState: undefined }));
+    expect(mockIssueChatThreadRender.mock.calls.at(-1)?.[0]?.comments).toContainEqual(expect.objectContaining({ id: "queued-comment-1", queueState: "queued" }));
     await act(async () => { delivery.reject(new Error("Connection lost")); await pending; });
     expect(await pending).toBeUndefined();
     await waitForAssertion(() => {

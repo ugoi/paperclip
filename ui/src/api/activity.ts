@@ -31,6 +31,7 @@ export interface RunForIssue {
   continuationAttempt?: number;
   lastUsefulActionAt?: string | null;
   nextAction?: string | null;
+  acceptedCommentInputs?: Array<{ id: string; updatedAt: string }> | null;
   wakeCommentIds?: string[] | null;
   wakeCommentId?: string | null;
   contextCommentId?: string | null;

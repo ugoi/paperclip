@@ -126,6 +126,19 @@ describe("TaskChatQueuedMessages", () => {
     else expect(props.onInterrupt).toHaveBeenCalledOnce();
   });
 
+  it("allows an early interrupt with a local remainder and shows durable acknowledgement without hiding inputs", async () => {
+    const early = { ...queue, queueId: null, protocol: "legacy" as const, entries: queue.entries.map(entry => ({ ...entry, pending: true })) };
+    const props = render({ queue: early, onInterrupt: vi.fn().mockResolvedValue(undefined) });
+    const button = () => container.querySelector<HTMLButtonElement>('[data-testid="task-chat-queued-interrupt-comment-1"]')!;
+    expect(button().disabled).toBe(false);
+    await act(async () => { button().click(); });
+    expect(props.onInterrupt).toHaveBeenCalledOnce();
+    expect(container.querySelectorAll('[data-testid^="task-chat-queued-message-"]')).toHaveLength(2);
+    render({ ...props, queue: { ...early, queueId: "server-queue", interruptRequestedAt: "2026-10-14T10:00:00Z" } });
+    expect(button().disabled).toBe(true);
+    expect(button().textContent).toContain("Interrupt requested");
+  });
+
   it("reorders the complete queue and rewrites contiguous positions", () => {
     const next = reorderQueuedMessageEntries(
       queue.entries,
@@ -177,7 +190,7 @@ describe("TaskChatQueuedMessages", () => {
     });
   });
 
-  it("clears the entire interrupt queue immediately and restores it inline on failure", async () => {
+  it("keeps unreceived inputs visible while requesting interruption and on failure", async () => {
     let rejectInterrupt!: (error: Error) => void;
     const interrupted = new Promise<void>((_, reject) => { rejectInterrupt = reject; });
     const props = render({ queue: { ...queue, protocol: "legacy", steeringDisposition: "unsupported" },
@@ -186,7 +199,7 @@ describe("TaskChatQueuedMessages", () => {
       container.querySelector<HTMLButtonElement>('[data-testid="task-chat-queued-interrupt-comment-1"]')!.click();
     });
     expect(props.onInterrupt).toHaveBeenCalledOnce();
-    expect(container.querySelector('[data-testid="task-chat-queued-messages"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid^="task-chat-queued-message-"]')).toHaveLength(2);
     await act(async () => { rejectInterrupt(new Error("Connection lost")); await interrupted.catch(() => undefined); });
     expect(container.querySelectorAll('[data-testid^="task-chat-queued-message-"]')).toHaveLength(2);
     expect(container.textContent).toContain("Couldn’t interrupt. Message is still queued.");
@@ -361,7 +374,7 @@ describe("TaskChatQueuedMessages", () => {
     ).toBeNull();
   });
 
-  it.each(["run-1", null])("delivers legacy queued messages with target %s", async (targetRunId) => {
+  it.each(["run-1", null])("records intent without hiding legacy queued messages with target %s", async (targetRunId) => {
     const onInterrupt = vi.fn().mockResolvedValue(undefined);
     render({
       queue: {
@@ -391,6 +404,6 @@ describe("TaskChatQueuedMessages", () => {
       container.querySelector(
         '[data-testid="task-chat-queued-message-comment-1"]',
       ),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 });

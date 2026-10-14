@@ -28,6 +28,12 @@ async function request(message) {
       fs.appendFileSync(`${root}/prompts`, `${JSON.stringify(message.params)}\n`);
       fs.appendFileSync(`${root}/run-env`, `${JSON.stringify({ runId: process.env.PAPERCLIP_RUN_ID, tokenHash: createHash('sha256').update(process.env.PAPERCLIP_API_KEY ?? '').digest('hex'), scratchDir: process.env.PAPERCLIP_RUN_SCRATCH_DIR })}\n`);
       if (fs.existsSync(`${root}/continued`)) {
+        if (process.env.PAPERCLIP_STOP_FIXTURE_HOLD_FIRST_FOLLOWUP === '1' && !fs.existsSync(`${root}/held-followup`)) {
+          fs.writeFileSync(`${root}/held-followup`, 'accepted');
+          active = message;
+          update(message.params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Accepted first follow-up.' } });
+          return undefined;
+        }
         const paused = JSON.stringify(message.params.prompt).includes('tree-hold interaction: yes');
         if (!paused) {
           fs.appendFileSync(`${root}/completed`, 'follow-up\n');

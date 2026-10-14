@@ -4,6 +4,7 @@ import { agentWakeupRequests, agents, heartbeatRuns, issueComments, issues } fro
 import type { IssueComment, IssueQueuedCommentQueue } from "@paperclipai/shared";
 import {
   buildQueuedCommentQueueSnapshot,
+  queuedCommentInterruptRequestedAt,
   decideQueuedCommentQueueSteering,
   queuedCommentIdsFromWakePayload,
   withQueuedCommentIdsInRunContext,
@@ -161,6 +162,7 @@ function buildTransaction(tx: Db, companyId: string, deps: QueuedCommentQueuePos
       return buildQueuedCommentQueueSnapshot({
         issueId: issue.id,
         queueId: wake?.id ?? null,
+        interruptRequestedAt: queuedCommentInterruptRequestedAt(wake?.payload?.queuedCommentInterrupt, comments),
         state,
         activeRunId: activeRun?.id ?? null,
         protocol: steering.protocol,
