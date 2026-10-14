@@ -15522,6 +15522,7 @@ export function issueRoutes(
           payload: { ...readObject(locked.wake.payload), queuedCommentInterrupt: {
             ...(sameTarget ? previousIntent : {}),
             actorId: actor.actorId,
+            actorSource: req.actor.source,
             requestedAt: retainedInputs.length && typeof previousIntent.requestedAt === "string"
               ? previousIntent.requestedAt : new Date().toISOString(),
             targetRunId,

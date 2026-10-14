@@ -25,8 +25,17 @@ part of this patch.
   deferred states are both legal. The existing sweep retries saved intent after
   the original target becomes interruptible; it never acquires stop authority
   over a successor. The existing scheduler/admission/cleanup gates still apply.
+- Saved intent is not a permanent authorization grant. Revalidate current board
+  policy before claiming Stop and again after cleanup and under admission lock.
+  The generic release path cannot promote or fail these requests: only the
+  intent dispatcher may consume them. A pause remains retryable. Admission
+  adopts only unchanged selected revisions; edited/unselected input remains
+  deferred, including when only part of the selection is still valid.
 - A repeated older selection cannot erase another saved input on the same target.
   Concurrent requests merge current revisions under the task lock.
+- Historical intents without selected revisions cannot certify a later edit.
+  Keep their messages visible and the action available for a fresh verifiable
+  request; never fabricate a revision during upgrade.
 - Edits invalidate the selected revision. If all selected revisions disappear,
   the old intent no longer disables the action for the remaining edited inputs.
   A receipt/discard is rechecked under the task lock before Stop and again at
@@ -37,10 +46,18 @@ part of this patch.
   blindly retried. No optimistic hiding of interrupted messages remains.
 
 The receipt callback is an adapter extension point. This patch supplies the
-producer in the shared ACP engine (used by this installation's Codex agents).
-Missing receipts from another transport remain unknown; successful preparation
-or a wake ID is deliberately insufficient. Native steering retains its separate
-provider acknowledgement path. Historical browser state is not reconstructed.
+producer in the shared ACP engine (used by this installation's Codex agents)
+and at the native executor's committed PRP boundary. Native offered revisions
+are frozen alongside the execution input. The full bootstrap and compact continuation have separate offered snapshots.
+A receipt must match the durable submitted prompt and its accepted provider turn;
+a disposition-only recovery cannot acknowledge the original input. Codex turn.accepted follows
+its provider response. ACPX/OpenCode emit accepted before send, so those events
+cannot acknowledge input; provider agent output or successful completion is
+required. Submission, cancellation, failure and unknown transports do not create
+receipts. Duplicate durable events repeat only idempotent receipt reconciliation, closing
+the crash window between event append and receipt persistence. Native steering
+retains its separate provider acknowledgement path.
+Historical browser state is not reconstructed.
 
 ## Reproducible checks
 
@@ -54,7 +71,9 @@ pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
 pnpm --filter @paperclipai/paperclip-runner run build:typescript
 pnpm exec vitest run ui/src/api/issues.test.ts ui/src/pages/IssueDetail.test.tsx ui/src/lib/optimistic-issue-comments.test.ts ui/src/lib/issue-queued-comment-queue.test.ts ui/src/components/task-chat/TaskChatQueuedMessages.test.tsx packages/adapter-utils/src/comment-input-receipts.test.ts server/src/services/issue-queued-comment-queue.test.ts
 pnpm exec vitest run packages/adapter-utils/src/acpx-engine/execute.test.ts -t 'receipt|accepted|cancelled turn'
-pnpm exec vitest run server/src/__tests__/issue-queued-comments-routes.test.ts
+pnpm exec vitest run server/src/__tests__/issue-queued-comments-routes.test.ts server/src/__tests__/issue-queued-comments-races.test.ts
+pnpm exec vitest run server/src/services/explicit-native-continuation.test.ts
+pnpm exec vitest run server/src/modules/wake-queue/application/use-cases.test.ts server/src/services/native-runtime/native-comment-input-receipts.test.ts
 pnpm --filter @paperclipai/server exec tsc --noEmit
 pnpm --filter @paperclipai/ui exec tsc --noEmit
 pnpm --filter @paperclipai/adapter-utils exec tsc --noEmit
@@ -76,7 +95,7 @@ without a reload, followed by another real pending input.
 ## Managed rollout preparation
 
 The handoff report identifies the final reviewed commit and independent QA.
-Source and tests are retained in the fork branch; do not hotpatch production
+Source and tests are retained in the local branch and internal Git bundle; do not hotpatch production
 `dist` files or silently return to the older local checkout. A managed git
 payload pinned to the reviewed commit is the supported source-build path:
 
@@ -85,7 +104,9 @@ paperclipai install --repo ugoi/paperclip --ref <reviewed-full-commit> --yes
 ```
 
 This command builds and changes the managed `current` pointer. It is a rollout
-command, **not a harmless preview**. Do not run it against the real home until
+command, **not a harmless preview**. The commit must first exist on the stated
+remote. The current internal handoff does not establish external publication
+permission or remote availability. Do not run it against the real home until
 CEO has coordinated active work and accepted the tested payload. First rehearse
 it under a disposable home/install store with Node 24, pnpm and the Rust build
 toolchain. The complete source installer also rebuilds the unchanged native

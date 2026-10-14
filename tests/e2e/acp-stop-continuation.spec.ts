@@ -81,7 +81,7 @@ for (const { unfinishedWrite, stopResponse, holdFirstFollowup } of [
         await page.getByRole("button", { name: "Interrupt", exact: true }).click();
       }
       await expect(page.getByText("Answered the pending follow-up once.", { exact: false })).toBeVisible({ timeout: 30_000 });
-      await expect.poll(async () => (await json(await request.get(`/api/issues/${issue.id}/live-runs`))).length).toBe(0);
+      await expect.poll(async () => (await json(await request.get(`/api/issues/${issue.id}/live-runs`))).length, { timeout: 30_000 }).toBe(0);
       const prompts = (await readFile(path.join(root, "prompts"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
       expect(prompts).toHaveLength(holdFirstFollowup ? 3 : 2);
       expect(new Set(prompts.map(prompt => prompt.sessionId)).size).toBe(1);

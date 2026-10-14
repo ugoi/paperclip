@@ -1,3 +1,4 @@
+import { recordNativeAcceptedCommentInputs } from "./native-comment-input-receipts.js";
 import { CURSOR_DISTRIBUTION_PINS, QUALIFIED_ACPX_PROFILES, QUALIFIED_ACPX_VERSION } from "../../vendor/paperclip-runner/index.js";
 import { isProviderMode } from "../../vendor/paperclip-runner/index.js";
 import { bundledRemoteProviderPackManifestPath, bundledRemoteRunnerBinary } from "../../vendor/paperclip-runner/index.js";
@@ -8002,6 +8003,7 @@ async function executePaperclipNativeSessionWithinScope(
     {
       privateKeyPem: input.runnerEnvironment?.PAPERCLIP_AGENT_PRIVATE_KEY,
       onCommittedEvent: async (event) => {
+        await recordNativeAcceptedCommentInputs(input.db, input.execution.binding, event);
         await observeAccountingEvent(event);
         await toolTrace.observe(event);
         if (event.eventType === "item.completed" &&
@@ -8210,6 +8212,9 @@ async function executePaperclipNativeSessionWithinScope(
         );
       },
       onDuplicateEvent: async (event) => {
+        // Recover a crash between durable event append and receipt persistence.
+        // Receipt pruning is idempotent and still checks the offered revision.
+        await recordNativeAcceptedCommentInputs(input.db, input.execution.binding, event);
         await observeAccountingEvent(event);
         // A crash can happen after the event commit but before its callback
         // finishes. Recover only idempotent durable projections here; activity,

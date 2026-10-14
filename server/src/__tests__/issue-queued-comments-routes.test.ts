@@ -237,8 +237,9 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(target.status).toBe(scenario === "ready" ? "cancelled" : "running");
     const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
     if (scenario === "ready") {
-      // Ordinary finalization may promote this very wake while Stop settles.
-      expect(wake.status).toBe("queued");
+      // The actor/revision-bound dispatcher adopts this wake after Stop.
+      // Generic finalization must not promote it before revalidation.
+      expect(wake.status).toBe("coalesced");
       expect(wake.runId).not.toBe(seeded.runId);
       expect((await db.select().from(heartbeatRuns)).filter(run => run.status === "queued")).toHaveLength(1);
     }
@@ -817,7 +818,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, seeded.issueId));
     const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
     await db.update(agentWakeupRequests).set({ payload: { ...wake.payload,
-      queuedCommentInterrupt: { actorId: "other-operator", requestedAt: new Date().toISOString() },
+      queuedCommentInterrupt: { actorId: "other-operator", actorSource: "session", inputs: (await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).map(comment => ({id:comment.id,updatedAt:comment.updatedAt.toISOString()})), requestedAt: new Date().toISOString() },
     } }).where(eq(agentWakeupRequests.id, seeded.wakeId));
     // Keep this agent at capacity so successful delivery queues a successor
     // without launching a provider. The independent run shares only the task.

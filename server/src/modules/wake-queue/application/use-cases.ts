@@ -152,6 +152,7 @@ async function runReleaseDrain(
   // fail loudly, instead of holding this transaction open forever.
   const processedWakeIds = new Set<string>();
   const handoffWakeIds: string[] = [];
+  let hasSavedInterrupt = false;
 
   while (true) {
     const candidate = await ports.transaction.findNextDeferredWake({
@@ -167,6 +168,14 @@ async function runReleaseDrain(
       );
     }
     processedWakeIds.add(candidate.id);
+    // Only the saved-intent dispatcher may execute this actor/revision-bound
+    // request. Generic release must not strip its authority or fail it on a
+    // temporary pause while joining the provider. Keep it for the sweep.
+    if (candidate.payload.queuedCommentInterrupt) {
+      hasSavedInterrupt = true;
+      handoffWakeIds.push(candidate.id);
+      continue;
+    }
 
     // A lead can post its closing comment before committing Done. Check
     // again when the source run releases its queue, using every original
@@ -309,6 +318,7 @@ async function runReleaseDrain(
     return promoted;
   }
 
+  if (hasSavedInterrupt) return { outcome: { kind: "released" }, postCommitEffects };
   return runReleaseRecoveryTail(issue, run, ports.host, ports.transaction, input, postCommitEffects);
 }
 

@@ -56,7 +56,7 @@ export function withQueuedCommentIdsInWakePayload(
 export function queuedCommentInterruptRequestedAt(intentValue: unknown, comments: Array<{ id: string; updatedAt: Date | string }>): string | null {
   const intent = record(intentValue);
   if (typeof intent.requestedAt !== "string") return null;
-  if (!Array.isArray(intent.inputs)) return intent.requestedAt; // earlier persisted board receipts
+  if (!Array.isArray(intent.inputs)) return null; // Historical intent has no verifiable revision.
   return comments.some(comment => (intent.inputs as unknown[]).some(value => {
     const input = record(value);
     return input.id === comment.id && input.updatedAt === new Date(comment.updatedAt).toISOString();

@@ -13,8 +13,8 @@ import { join } from "node:path";
 import { and, eq, sql } from "drizzle-orm";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
 import {
-  approvals, issueApprovals, issueThreadInteractions, chatConversations, chatEndpoints, toolApplications, toolConnections,
-  agentWakeupRequests, agents, companies, createDb, heartbeatRunEvents, heartbeatRuns, issueComments, issueRecoveryActions,
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, approvals, issueApprovals, issueThreadInteractions, chatConversations, chatEndpoints, toolApplications, toolConnections,
+  agentWakeupRequests, agents, companies, companyMemberships, createDb, heartbeatRunEvents, heartbeatRuns, issueComments, issueRecoveryActions,
   issues, nativeRunFinalizations, nativeRunResults, completionContracts, environmentLeases, environments, issueRelations, issueTreeHolds, issueTreeHoldMembers,
 } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase, getEmbeddedPostgresTestSupport } from "../__tests__/helpers/embedded-postgres.js";
@@ -30,13 +30,20 @@ const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("explicit native conversation continuation", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
-  beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("explicit-native-message-"); db = createDb(database.connectionString); }, 30000);
+  beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("explicit-native-message-"); db = createDb(database.connectionString); }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await database?.cleanup(); });
+  // Provider-receipt fixture: wake IDs alone are scheduling metadata.
+  async function acceptedInputs(ids: string[]) {
+    const comments = await db.select().from(issueComments);
+    return comments.filter(comment => ids.includes(comment.id)).map(comment => ({ id: comment.id, updatedAt: comment.updatedAt.toISOString() }));
+  }
   async function seed() {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
     const sourceRunId = randomUUID(), successorRunId = randomUUID();
     const commentId: string = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Explicit turn", defaultResponsibleUserId: "board", issuePrefix: `E${companyId.slice(0, 6)}` });
+    // These positive board fixtures need current authority, not just a saved actor ID.
+    await db.insert(companyMemberships).values({companyId,principalType:"user",principalId:"board",status:"active",membershipRole:"operator"});
     await db.insert(agents).values({ id: agentId, companyId, name: "Native", role: "engineer", adapterType: "paperclip_runner", status: "idle", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } });
     await db.insert(issues).values({ id: issueId, companyId, title: "Deploy", status: "blocked", assigneeAgentId: agentId });
     await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId, agentId,
@@ -121,7 +128,8 @@ const support = await getEmbeddedPostgresTestSupport();
       queuedIds = [f.commentId, secondId];
       expectedIds = gate === "first_delivered" ? [secondId] : gate === "last_delivered" ? [f.commentId] : queuedIds;
       if (gate !== "mixed_authors") await db.update(heartbeatRuns).set({ startedAt: new Date("2026-09-11T09:02:00Z"),
-        contextSnapshot: { issueId: f.issueId, wakeCommentIds: gate === "first_delivered" ? [f.commentId] : [secondId] },
+        contextSnapshot: { issueId: f.issueId, wakeCommentIds: gate === "first_delivered" ? [f.commentId] : [secondId],
+          acceptedCommentInputs: await acceptedInputs(gate === "first_delivered" ? [f.commentId] : [secondId]) },
       }).where(eq(heartbeatRuns.id, f.sourceRunId));
     }
     const queueId = randomUUID();
@@ -169,7 +177,7 @@ const support = await getEmbeddedPostgresTestSupport();
       source: "automation", reason: "issue_commented", status: "deferred_issue_execution",
       requestedByActorType: "system", payload: { issueId: f.issueId, commentId: f.commentId,
         _paperclipWakeContext: { wakeCommentIds: [f.commentId] },
-        queuedCommentInterrupt: { actorId: "board", requestedAt: new Date().toISOString() } },
+        queuedCommentInterrupt: { actorId: "board", actorSource: "session", inputs: await acceptedInputs([f.commentId]), requestedAt: new Date().toISOString() } },
     });
     const identities = [f, other].map(fixture => ({ id: randomUUID(), companyId: fixture.companyId,
       heartbeatRunId: fixture.sourceRunId, provider: "daytona", providerLeaseId: fixture.sourceRunId }));
@@ -226,7 +234,7 @@ const support = await getEmbeddedPostgresTestSupport();
       source: "on_demand", reason: "issue_commented", status: "deferred_issue_execution",
       requestedByActorType: "user", requestedByActorId: "original-author",
       payload: { issueId: f.issueId, _paperclipWakeContext: { wakeCommentIds: [f.commentId] },
-        queuedCommentInterrupt: { actorId: "board", requestedAt: new Date().toISOString() } },
+        queuedCommentInterrupt: { actorId: "board", actorSource: "session", inputs: await acceptedInputs([f.commentId]), requestedAt: new Date().toISOString() } },
     });
     const attempt = (queue = queueId) => db.transaction(async tx => {
       await tx.select().from(issues).where(eq(issues.id, f.issueId)).for("update");
@@ -258,7 +266,7 @@ const support = await getEmbeddedPostgresTestSupport();
       source: "automation", reason: "issue_commented", status: "deferred_issue_execution",
       requestedByActorType: "system", payload: { issueId: f.issueId, commentId: f.commentId,
         _paperclipWakeContext: { wakeCommentIds: [f.commentId] },
-        queuedCommentInterrupt: { actorId: "board", requestedAt: new Date().toISOString() } },
+        queuedCommentInterrupt: { actorId: "board", actorSource: "session", inputs: await acceptedInputs([f.commentId]), requestedAt: new Date().toISOString() } },
     });
     await heartbeatService(db).resumeQueuedCommentInterrupt(f.companyId, queueId);
     const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
@@ -304,7 +312,7 @@ const support = await getEmbeddedPostgresTestSupport();
       status: "running", contextSnapshot: { issueId: randomUUID() } });
     const queueId = randomUUID();
     const payload = { issueId: f.issueId, _paperclipWakeContext: { wakeCommentIds: [f.commentId] },
-      queuedCommentInterrupt: { actorId: "board", requestedAt: new Date().toISOString() } };
+      queuedCommentInterrupt: { actorId: "board", actorSource: "session", inputs: await acceptedInputs([f.commentId]), requestedAt: new Date().toISOString() } };
     await db.insert(agentWakeupRequests).values({ id: queueId, companyId: f.companyId, agentId: f.agentId,
       source: "automation", reason: "issue_commented", status: "deferred_issue_execution",
       requestedByActorType: "system", payload });
@@ -341,7 +349,7 @@ const support = await getEmbeddedPostgresTestSupport();
         cancellation: { source: "provider", expected: false, initiator: { type: "provider" },
           reason: "Provider cancelled execution", recordedAt: new Date().toISOString() },
       } } : {}),
-      contextSnapshot: { issueId: f.issueId, ...(kind === "already_delivered" ? { wakeCommentIds: [f.commentId] } : {}) },
+      contextSnapshot: { issueId: f.issueId, ...(kind === "already_delivered" ? { wakeCommentIds: [f.commentId], acceptedCommentInputs: await acceptedInputs([f.commentId]) } : {}) },
     }).where(eq(heartbeatRuns.id, f.sourceRunId));
     await db.update(issueRecoveryActions).set({ cause: "legacy_execution_requires_reconciliation" })
       .where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
@@ -365,7 +373,7 @@ const support = await getEmbeddedPostgresTestSupport();
       const earlierId = randomUUID();
       await db.insert(issueComments).values({ id: earlierId, companyId: f.companyId, issueId: f.issueId,
         authorType: "user", authorUserId: f.actorId, body: "Already handled" });
-      await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: f.issueId, wakeCommentIds: [earlierId] } })
+      await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: f.issueId, wakeCommentIds: [earlierId], acceptedCommentInputs: await acceptedInputs([earlierId]) } })
         .where(eq(heartbeatRuns.id, f.sourceRunId));
       await db.update(agentWakeupRequests).set({ payload: { issueId: f.issueId,
         _paperclipWakeContext: { wakeCommentIds: [earlierId, f.commentId] } } })
@@ -940,7 +948,7 @@ const support = await getEmbeddedPostgresTestSupport();
         createdAt: new Date(kind === "earlier_delivered" ? "2026-09-11T10:30:00Z" : "2026-09-11T11:30:00Z") });
       await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "succeeded",
         startedAt: new Date("2026-09-11T12:00:00Z"), finishedAt: new Date("2026-09-11T12:01:00Z"),
-        contextSnapshot: { issueId: f.issueId, wakeCommentIds: [deliveredId] } });
+        contextSnapshot: { issueId: f.issueId, wakeCommentIds: [deliveredId], acceptedCommentInputs: await acceptedInputs([deliveredId]) } });
       await db.update(agentWakeupRequests).set({ payload: { ...waiting.payload,
         _paperclipWakeContext: { wakeCommentIds: kind === "earlier_delivered" ? [deliveredId, f.commentId] : [f.commentId, deliveredId] } },
       }).where(eq(agentWakeupRequests.id, waiting.id));
@@ -1484,13 +1492,13 @@ const support = await getEmbeddedPostgresTestSupport();
       queuedIds = [f.commentId, secondId];
       expectedIds = gate === "last_delivered" ? [f.commentId] : queuedIds;
       if (gate === "last_delivered") await db.update(heartbeatRuns).set({
-        contextSnapshot: { issueId: f.issueId, wakeCommentIds: [secondId] },
+        contextSnapshot: { issueId: f.issueId, wakeCommentIds: [secondId], acceptedCommentInputs: await acceptedInputs([secondId]) },
       }).where(eq(heartbeatRuns.id, f.sourceRunId));
     }
     if (gate === "live_process") await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, f.sourceRunId));
     if (gate === "operator_stop") await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "operator_interrupted" }).where(eq(heartbeatRuns.id, f.sourceRunId));
     if (gate === "delivered") await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: f.issueId,
-      wakeCommentIds: queuedIds } }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      wakeCommentIds: queuedIds, acceptedCommentInputs: await acceptedInputs(queuedIds) } }).where(eq(heartbeatRuns.id, f.sourceRunId));
     if (gate === "pause") {
       const holdId = randomUUID();
       await db.insert(issueTreeHolds).values({ id: holdId, companyId: f.companyId, rootIssueId: f.issueId, mode: "pause", status: "active" });

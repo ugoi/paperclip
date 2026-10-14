@@ -1,3 +1,5 @@
+import { nativePromptCommentInputs } from "./native-runtime/native-comment-input-receipts.js";
+import { canExecuteQueuedInterrupt } from "./queued-interrupt-authority.js";
 import { activeIssueInteractionCondition, TASK_QUESTION_GUIDANCE } from "./issue-question-context.js";
 import { createAgentIdentityRedactor } from "./agent-identity-redaction.js";
 import { agentIdentityService, supportsManagedAgentIdentity } from "./agent-identity.js";
@@ -10574,11 +10576,13 @@ export function heartbeatService(
       actorId = comment.authorUserId;
     }
     if (!actorId) return;
+    if (interrupted && !await canExecuteQueuedInterrupt(db, companyId, issueId, parseObject(payload.queuedCommentInterrupt))) return;
     const agent = await getAgent(wake.agentId);
     if (!agent || agent.companyId !== companyId || (agent.adapterType === "paperclip_runner" && !response?.source.requiresFreshSession)) return;
     if (interrupted && !response) {
       const intent = parseObject(payload.queuedCommentInterrupt);
       const requested = Array.isArray(intent.inputs) ? intent.inputs : null;
+      if (!requested) return; // Unversioned historical intent cannot authorize a current edit.
       if (requested) {
         const comments = await db.select({ id: issueComments.id, updatedAt: issueComments.updatedAt })
           .from(issueComments).where(and(eq(issueComments.companyId, companyId),
@@ -10591,7 +10595,7 @@ export function heartbeatService(
     }
     const [task] = await db.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
     if (!task || task.assigneeAgentId !== wake.agentId || ["done", "cancelled"].includes(task.status) ||
-        ["paused", "terminated"].includes(agent.status) || (await getSchedulingSuppression()).suppressed ||
+        ["paused", "pending_approval", "terminated"].includes(agent.status) || (await getSchedulingSuppression()).suppressed ||
         await treeControlSvc.getActivePauseHoldGate(companyId, issueId)) return;
     const [active] = await db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
@@ -10613,6 +10617,7 @@ export function heartbeatService(
         const currentIntent = parseObject(current?.payload?.queuedCommentInterrupt);
         if (!lockedTask || lockedTask.assigneeAgentId !== wake.agentId || ["done", "cancelled"].includes(lockedTask.status) ||
             !current || currentIntent.targetRunId !== active.id || currentIntent.actorId !== actorId) return false;
+        if (!await canExecuteQueuedInterrupt(tx as unknown as Db, companyId, issueId, currentIntent)) return false;
         if (!response) {
           const requested = Array.isArray(currentIntent.inputs) ? currentIntent.inputs : [];
           const candidates = await tx.select({ id: issueComments.id, updatedAt: issueComments.updatedAt }).from(issueComments).where(and(
@@ -10699,6 +10704,9 @@ export function heartbeatService(
         companyId, runId: sourceRun.id, actorId, reason: "queued_comment_interrupt",
       } });
     }
+    const currentAgent = await getAgent(wake.agentId);
+    if (!currentAgent || ["paused", "pending_approval", "terminated"].includes(currentAgent.status)) return;
+    if (interrupted && !await canExecuteQueuedInterrupt(db, companyId, issueId, parseObject(payload.queuedCommentInterrupt))) return;
     const deliveryPayload = response ? { ...payload } : withQueuedCommentIdsInWakePayload(payload, commentIds);
     delete deliveryPayload.queuedCommentInterrupt;
     await enqueueWakeup(wake.agentId, {
@@ -24489,6 +24497,11 @@ export function heartbeatService(
                     : {}),
                   nativeExecutionInput:
                     lockedProfile.nativeExecutionInput ?? nativeExecution,
+                  // Preparation records offered input only. The native executor
+                  // publishes a receipt after the provider accepts its turn.
+                  nativeCommentInputs: lockedProfile.nativeExecutionInput
+                    ? lockedProfile.nativeCommentInputs ?? []
+                    : nativePromptCommentInputs(executionContinuation, nativeExecution!),
                   nativeToolContractFingerprint:
                     nativeToolContractFingerprintForTarget(
                       executionTarget?.kind ?? "local",
@@ -27149,7 +27162,7 @@ export function heartbeatService(
       contextSnapshot: enrichedContextSnapshot,
       issueIdFromPayload,
       taskKey,
-      wakeCommentId,
+      wakeCommentId: initialWakeCommentId,
     } = enrichWakeContextSnapshot({
       contextSnapshot,
       reason,
@@ -27157,6 +27170,7 @@ export function heartbeatService(
       triggerDetail,
       payload,
     });
+    let wakeCommentId = initialWakeCommentId;
     // Keep each request's own server-derived origin, including coalesced wakes.
     // A run's merged context cannot establish which caller authored one receipt.
     // Overwrite caller-supplied nested context rather than trusting it.
@@ -27689,7 +27703,12 @@ export function heartbeatService(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
 
+          let interruptSelectedIds: string[] | null = null;
           if (executionWaitRequestId) {
+            if (opts.queuedCommentInterruptId) {
+              const currentAgent = await tx.select().from(agents).where(eq(agents.id, agentId)).then(rows => rows[0]);
+              if (!currentAgent || !(await evaluateAgentInvokabilityFromDb(tx as unknown as Db, currentAgent)).invokable) return { kind: "deferred" as const };
+            }
             const [pending] = await tx.select().from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.id, executionWaitRequestId), eq(agentWakeupRequests.companyId, agent.companyId),
               eq(agentWakeupRequests.agentId, agentId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
@@ -27710,6 +27729,8 @@ export function heartbeatService(
                   agent.companyId, issueId, pending.payload)))) {
               return { kind: "deferred" as const };
             }
+            if (opts.queuedCommentInterruptId && !await canExecuteQueuedInterrupt(tx as unknown as Db,
+              agent.companyId, issueId, parseObject(pending.payload?.queuedCommentInterrupt))) return { kind: "deferred" as const };
             if (opts.queuedCommentRequestId) {
               const ids = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
                 agent.companyId, issueId, agentId, queuedCommentIdsFromWakePayload(pending.payload));
@@ -27730,6 +27751,7 @@ export function heartbeatService(
               // asynchronous Stop/cleanup. An edit is not the old click's input.
               const intent = parseObject(parseObject(pending.payload).queuedCommentInterrupt);
               const requested = Array.isArray(intent.inputs) ? intent.inputs : null;
+              if (!requested) return { kind: "deferred" as const };
               const candidates = await tx.select({ id: issueComments.id, updatedAt: issueComments.updatedAt }).from(issueComments).where(and(
                 eq(issueComments.companyId, agent.companyId), eq(issueComments.issueId, issueId),
                 inArray(issueComments.id, queuedCommentIdsFromWakePayload(pending.payload)), isNull(issueComments.deletedAt),
@@ -27738,6 +27760,9 @@ export function heartbeatService(
                 input?.id === comment.id && input?.updatedAt === comment.updatedAt.toISOString())).map(comment => comment.id);
               const undelivered = await undeliveredLegacyUserCommentIds(tx as unknown as Db, agent.companyId, issueId, agentId, selected);
               if (!undelivered.length) return { kind: "deferred" as const };
+              interruptSelectedIds = undelivered;
+              wakeCommentId = undelivered.at(-1)!;
+              payload = withQueuedCommentIdsInWakePayload(payload, undelivered);
             }
             if (opts.queuedCommentInterruptId) {
               // The locked board receipt supplies execution authority even when
@@ -27747,7 +27772,7 @@ export function heartbeatService(
             if (opts.queuedCommentInterruptId || opts.queuedCommentRequestId) {
               // Edits/discards between the click and dispatch remain authoritative.
               Object.assign(enrichedContextSnapshot, withQueuedCommentIdsInRunContext(
-                enrichedContextSnapshot, queuedCommentIdsFromWakePayload(pending.payload),
+                enrichedContextSnapshot, interruptSelectedIds ?? queuedCommentIdsFromWakePayload(pending.payload),
               ));
             }
           }
@@ -28977,6 +29002,8 @@ export function heartbeatService(
             if (wake.id === executionWaitRequestId) return true;
             if (wake.id === opts.queuedCommentInterruptId || wake.id === opts.queuedCommentRequestId) return true;
             const deferredPayload = parseObject(wake.payload);
+            // An unrelated wake must never absorb a saved Interrupt selection.
+            if (opts.queuedCommentInterruptId || deferredPayload.queuedCommentInterrupt) return false;
             const deferredContext = parseObject(
               deferredPayload[DEFERRED_WAKE_CONTEXT_KEY],
             );
@@ -29004,6 +29031,7 @@ export function heartbeatService(
             adoptedCommentIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
               agent.companyId, issueId, agentId, adoptedCommentIds);
           }
+          if (interruptSelectedIds) adoptedCommentIds = interruptSelectedIds;
           const newRun = await tx
             .insert(heartbeatRuns)
             .values({
@@ -29046,6 +29074,17 @@ export function heartbeatService(
             .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
           if (adoptedComments.length) {
+            const retainedWakeIds = new Set<string>();
+            if (interruptSelectedIds) {
+              for (const wake of adoptedComments) {
+                const remaining = queuedCommentIdsFromWakePayload(wake.payload).filter(id => !interruptSelectedIds!.includes(id));
+                if (!remaining.length) continue;
+                retainedWakeIds.add(wake.id);
+                await tx.update(agentWakeupRequests).set({
+                  payload: withQueuedCommentIdsInWakePayload(wake.payload, remaining), updatedAt: new Date(),
+                }).where(eq(agentWakeupRequests.id, wake.id));
+              }
+            }
             await tx
               .update(agentWakeupRequests)
               .set({
@@ -29057,7 +29096,7 @@ export function heartbeatService(
               .where(
                 inArray(
                   agentWakeupRequests.id,
-                  adoptedComments.map((wake) => wake.id),
+                  adoptedComments.filter(wake => !retainedWakeIds.has(wake.id)).map((wake) => wake.id),
                 ),
               );
             await tx

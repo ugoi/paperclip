@@ -146,6 +146,17 @@ function createFakeRecovery(): RecoveryEscalationPort {
 }
 
 describe("releaseIssueExecution", () => {
+  it("retains a saved Interrupt for its dispatcher without promotion, failure or unrelated recovery", async () => {
+    const candidate = wakeCandidate({payload:{queuedCommentInterrupt:{actorId:"user-1",inputs:[{id:"c",updatedAt:"v"}]}}});
+    const transaction = createFakeTransaction({findNextDeferredWake:vi.fn(async ({excludedWakeIds}) => excludedWakeIds?.includes(candidate.id) ? null : candidate)});
+    const release = createReleaseIssueExecution({issueLock:createFakeIssueLock(createFakeHost(),transaction),recovery:createFakeRecovery()});
+    expect((await release({companyId:RUN.companyId,runId:RUN.id,now:new Date()})).outcome.kind).toBe("released");
+    expect(transaction.finalizePromotedWake).not.toHaveBeenCalled();
+    expect(transaction.failDeferredWake).not.toHaveBeenCalled();
+    expect(transaction.cancelDeferredWake).not.toHaveBeenCalled();
+    expect(transaction.queueImmediateRecoveryRun).not.toHaveBeenCalled();
+  });
+
   it.each(["closing", "mixed_comments", "explicit_resume", "interaction", "other_source_task", "parent_open"])(
     "checks late completed-delegation mentions without dropping independent input (%s)", async (scenario) => {
       const originalCommentIds = ["closing-comment", "second-comment"];
