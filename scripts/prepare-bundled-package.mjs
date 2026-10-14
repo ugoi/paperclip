@@ -7,7 +7,18 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
-export function materializePublishManifest(pkg) {
+export function readReleaseWorkspaceVersions(sourceRoot = repoRoot) {
+  const entries = JSON.parse(readFileSync(resolve(sourceRoot, "scripts/release-package-manifest.json"), "utf8"));
+  return new Map(entries.map(({ dir, name }) => {
+    const manifest = JSON.parse(readFileSync(resolve(sourceRoot, dir, "package.json"), "utf8"));
+    if (manifest.name !== name || typeof manifest.version !== "string" || !manifest.version) {
+      throw new Error(`Cannot resolve workspace package version for ${name} in ${dir}`);
+    }
+    return [name, manifest.version];
+  }));
+}
+
+export function materializePublishManifest(pkg, workspaceVersions = readReleaseWorkspaceVersions()) {
   const publishConfig = pkg.publishConfig ?? {};
   const publishManifest = { ...pkg };
 
@@ -21,8 +32,11 @@ export function materializePublishManifest(pkg) {
       Object.entries(publishManifest[section]).map(([name, specifier]) => {
         if (typeof specifier !== "string" || !specifier.startsWith("workspace:")) return [name, specifier];
         const range = specifier.slice("workspace:".length);
-        const prefix = range === "^" || range === "~" ? range : "";
-        return [name, `${prefix}${pkg.version}`];
+        const version = workspaceVersions.get(name);
+        if (!version) throw new Error(`Cannot resolve workspace dependency ${name} for ${pkg.name}`);
+        // Source installs may have different workspace versions (SDK 1.0.0,
+        // server 0.3.1). Release builds happen to unify them before this step.
+        return [name, range === "*" ? version : range === "^" || range === "~" ? `${range}${version}` : range];
       }),
     );
   }
@@ -156,7 +170,7 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
   }
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
-  const publishManifest = materializePublishManifest(sourcePackage);
+  const publishManifest = materializePublishManifest(sourcePackage, readReleaseWorkspaceVersions(sourceRoot));
   const installManifest = createBundledInstallManifest(publishManifest, bundledDependencies);
   writeFileSync(deployedPackagePath, `${JSON.stringify(installManifest, null, 2)}\n`);
 

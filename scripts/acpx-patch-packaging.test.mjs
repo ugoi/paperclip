@@ -166,13 +166,36 @@ test("bundled package staging materializes workspace dependency versions", () =>
     name: "@paperclipai/example",
     version: "2026.723.0",
     dependencies: { exact: "workspace:*", caret: "workspace:^", tilde: "workspace:~" },
-  });
+  }, new Map([["exact", "2026.723.0"], ["caret", "2026.723.0"], ["tilde", "2026.723.0"]]));
 
   assert.deepEqual(staged.dependencies, {
     exact: "2026.723.0",
     caret: "^2026.723.0",
     tilde: "~2026.723.0",
   });
+});
+
+test("bundled source packages retain each workspace dependency's own version", () => {
+  const staged = materializePublishManifest({
+    name: "server-fixture", version: "0.3.1",
+    dependencies: { sdk: "workspace:*", external: "^2.0.0" },
+    optionalDependencies: { optional: "workspace:^" },
+    peerDependencies: { peer: "workspace:~", explicit: "workspace:^3.0.0" },
+  }, new Map([["sdk", "1.0.0"], ["optional", "1.2.3"], ["peer", "2.3.4"], ["explicit", "3.1.0"]]));
+  assert.deepEqual(staged.dependencies, { sdk: "1.0.0", external: "^2.0.0" });
+  assert.deepEqual(staged.optionalDependencies, { optional: "^1.2.3" });
+  assert.deepEqual(staged.peerDependencies, { peer: "~2.3.4", explicit: "^3.0.0" });
+});
+
+test("bundled server resolves the actual plugin SDK instead of the server version", () => {
+  const sdk = JSON.parse(readFileSync(new URL("../packages/plugins/sdk/package.json", import.meta.url), "utf8"));
+  const server = JSON.parse(readFileSync(new URL("../server/package.json", import.meta.url), "utf8"));
+  assert.notEqual(server.version, sdk.version);
+  assert.equal(materializePublishManifest(server).dependencies[sdk.name], sdk.version);
+});
+
+test("bundled workspace dependencies fail closed when their version is unknown", () => {
+  assert.throws(() => materializePublishManifest({ name: "test", version: "0.3.1", dependencies: { missing: "workspace:*" } }, new Map()), /missing/);
 });
 
 test("bundled package staging installs only dependencies included in the tarball", () => {

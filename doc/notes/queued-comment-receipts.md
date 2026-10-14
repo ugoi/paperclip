@@ -115,6 +115,13 @@ an incomplete adapter/server package. The extracted archive must contain a
 nonempty regular `skills/paperclip/SKILL.md` before any build runs; an existing
 empty skills directory is not sufficient. Rejection preserves the active
 payload, manifest, shim and user data, and a corrected archive can be retried.
+Bundled publish manifests resolve workspace dependencies from each dependency's
+own source manifest. Git source builds can retain different package versions
+(server 0.3.1 and plugin SDK 1.0.0); substituting the consuming server's version
+would request an unavailable SDK from npm even when the correct local SDK
+tarball is supplied. Unknown workspace dependencies fail before packaging.
+The offline install regression packs different versions together and verifies
+both dependency resolution and the consumer's postinstall hook.
 
 ```sh
 PAPERCLIP_BUILD_COMMIT=<reviewed-full-commit> node <disposable-checkout>/cli/dist/index.js install --repo ugoi/paperclip --ref <reviewed-full-commit> --yes
