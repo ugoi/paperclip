@@ -76,14 +76,14 @@ it('refreshes run authority through two consecutive interrupted continuations', 
   let accepted!: () => void;
   const secondStarted = new Promise<void>(resolve => { accepted = resolve; });
   const second = execute({ ...ctx, runId: 'second', authToken: 'second-token', signal: secondAbort.signal,
-    runtime: { sessionParams: sessionCodec.serialize(firstResult.sessionParams ?? null) },
+    runtime: { ...ctx.runtime, sessionParams: sessionCodec.serialize(firstResult.sessionParams ?? null) },
     onLog: async (_stream, text) => { if (text.includes('Accepted first follow-up.')) accepted(); },
   });
   await secondStarted;
   secondAbort.abort();
   const secondResult = await second;
   const third = await execute({ ...ctx, runId: 'third', authToken: 'third-token', signal: undefined,
-    runtime: { sessionParams: sessionCodec.serialize(secondResult.sessionParams ?? null) },
+    runtime: { ...ctx.runtime, sessionParams: sessionCodec.serialize(secondResult.sessionParams ?? null) },
   });
   expect(third.exitCode, JSON.stringify(third)).toBe(0);
   const launches = (await fs.readFile(path.join(root, 'run-env'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
