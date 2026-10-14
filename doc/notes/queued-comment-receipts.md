@@ -105,7 +105,13 @@ upgrade, rather than invoking the old installed CLI. Build that bootstrap CLI
 with Node 24, `pnpm install --frozen-lockfile`, then
 `bash scripts/build-npm.sh --skip-checks --skip-typecheck` after the separately
 recorded checks have passed. The installer now explicitly prepares the static UI
-before copying bundled server files and aborts if the UI build fails.
+before copying bundled server files and aborts if the UI build fails. It also
+matches `release.sh` by staging the repository runtime skills into the server,
+Claude-local and Codex-local packages. Already built bundled packages are packed
+with `--ignore-scripts`: their source-relative prepack scripts are unavailable
+in staging. This does not suppress lifecycle hooks during the final consumer
+installation. Missing runtime skills abort staging rather than silently shipping
+an incomplete adapter/server package.
 
 ```sh
 PAPERCLIP_BUILD_COMMIT=<reviewed-full-commit> node <disposable-checkout>/cli/dist/index.js install --repo ugoi/paperclip --ref <reviewed-full-commit> --yes

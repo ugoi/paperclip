@@ -117,6 +117,8 @@ describe("managed install commands", () => {
           { dir: "server", name: "@paperclipai/server", packageJson: { name: "@paperclipai/server", version: "0.3.1", dependencies: { "@paperclipai/db": "workspace:*" } } },
         ];
         fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
+        fs.mkdirSync(path.join(checkout, "skills", "paperclip"), { recursive: true });
+        fs.writeFileSync(path.join(checkout, "skills", "paperclip", "SKILL.md"), "runtime skill from selected commit");
         fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ version: "0.3.1" }));
         fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
         fs.writeFileSync(path.join(checkout, "scripts", "release-package-manifest.json"), JSON.stringify(packages.map(({ dir, name }) => ({ dir, name }))));
@@ -168,6 +170,7 @@ describe("managed install commands", () => {
     expect(runCommand.mock.calls.filter(([command, args]) => command === "npm" && args[0] === "pack")).toHaveLength(2);
     const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
     expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(4);
+    expect(installCall?.[1]).not.toContain("--ignore-scripts");
   });
 
   it("builds git checkouts with NODE_ENV cleared so ambient production mode keeps devDependencies", async () => {
@@ -203,7 +206,7 @@ describe("managed install commands", () => {
         const manifestPath = path.join(serverRoot, "package.json");
         const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
         // Match the shipped server: staging copies files before npm prepack.
-        fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, files: ["ui-dist"], bundleDependencies: ["acpx"] }));
+        fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, files: ["ui-dist", "skills"], bundleDependencies: ["acpx"] }));
         serverUi = path.join(serverRoot, "ui-dist", "index.html");
         expect(fs.existsSync(serverUi)).toBe(false);
         return result;
@@ -215,6 +218,15 @@ describe("managed install commands", () => {
       }
       if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs") && path.basename(args[1]) === "server") {
         copiedUi = fs.readFileSync(serverUi!, "utf8");
+        const checkout = path.dirname(args[1]);
+        for (const dir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+          expect(fs.readFileSync(path.join(checkout, dir, "skills", "paperclip", "SKILL.md"), "utf8")).toBe("runtime skill from selected commit");
+        }
+      }
+      if (file === "npm" && args[0] === "pack" && args[1]?.includes("workspace-package-")) {
+        // Build hooks require source-relative scripts absent from staged packages.
+        expect(args).toContain("--ignore-scripts");
+        expect(options?.cwd).toBe(args[1]);
       }
       return delegate(file, args, options);
     };
@@ -226,6 +238,20 @@ describe("managed install commands", () => {
       await expect(installGitPayload("paperclipai/paperclip", sha, runCommand, paths)).resolves.toMatchObject({ reused: false });
       expect(copiedUi).toBe("fresh UI for selected commit");
     }
+    expect(fs.existsSync(paths.currentPath)).toBe(false);
+  });
+
+  it("does not finish or activate a git payload when release runtime skills are missing", async () => {
+    const sha = "f".repeat(40);
+    const paths = resolveInstallStorePaths();
+    const delegate = createGitCheckoutRunCommand(sha);
+    const runCommand: CommandRunner = async (file, args, options) => {
+      const result = await delegate(file, args, options);
+      if (file === "tar") fs.rmSync(path.join(args[args.indexOf("-C") + 1], "skills"), { recursive: true });
+      return result;
+    };
+    await expect(installGitPayload("paperclipai/paperclip", sha, runCommand, paths)).rejects.toThrow("skills");
+    expect(fs.existsSync(payloadPathFor(paths, "git", sha.slice(0, 12)))).toBe(false);
     expect(fs.existsSync(paths.currentPath)).toBe(false);
   });
 

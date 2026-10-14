@@ -281,6 +281,13 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     // Bundled staging copies the server's files before npm can run prepack.
     // A fresh archive has no UI output, so build/copy it explicitly first.
     await runCommand("bash", ["scripts/prepare-server-ui-dist.sh"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
+    // Match release.sh: these packages resolve runtime skills relative to their
+    // published roots. npm pack otherwise silently omits the adapters' skills.
+    for (const dir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+      const destination = path.join(checkoutPath, dir, "skills");
+      fs.rmSync(destination, { recursive: true, force: true });
+      fs.cpSync(path.join(checkoutPath, "skills"), destination, { recursive: true });
+    }
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
     const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);
     for (const [index, workspacePackage] of workspacePackages.entries()) {
@@ -290,7 +297,9 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
       if (bundledDependencies.length > 0) {
         const stagedPackage = path.join(stagingRoot, `workspace-package-${index}`);
         await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "prepare-bundled-package.mjs"), packageDir, stagedPackage], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
-        await runCommand("npm", ["pack", stagedPackage, "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
+        // Already built and staged, as in the release packaging flow. Running
+        // prepack here would require source-relative scripts absent from staging.
+        await runCommand("npm", ["pack", stagedPackage, "--ignore-scripts", "--pack-destination", stagingRoot], { cwd: stagedPackage, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
       } else {
         await runCommand("corepack", ["pnpm", "--dir", workspacePackage.dir, "pack", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv({ PAPERCLIP_RELEASE_REUSE_UI_DIST: "1" }), maxBuffer: 32 * 1024 * 1024 });
       }
