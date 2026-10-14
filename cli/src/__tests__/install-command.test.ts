@@ -137,14 +137,16 @@ describe("managed install commands", () => {
       }
       if (file === "bash") return { stdout: "", stderr: "" };
       if (file === "npm" && args[0] === "pack") {
-        const packageName = args[1]?.includes("workspace-package-") ? "paperclipai-db" : "paperclipai";
+        const packageName = args[1]?.includes("workspace-package-")
+          ? JSON.parse(fs.readFileSync(path.join(args[1], "package.json"), "utf8")).name.replace(/^@/, "").replace("/", "-")
+          : "paperclipai";
         fs.writeFileSync(path.join(args[args.indexOf("--pack-destination") + 1], `${packageName}-0.3.1.tgz`), "package");
         return { stdout: "", stderr: "" };
       }
       if (file === "npm" && args[0] === "install") { const prefix = args[args.indexOf("--prefix") + 1]; const packageRoot = path.join(prefix, "node_modules", "paperclipai"); fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true }); fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ version: "0.3.1" })); fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "#!/usr/bin/env node\n"); return { stdout: "", stderr: "" }; }
       if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")) {
         fs.mkdirSync(args[2], { recursive: true });
-        fs.writeFileSync(path.join(args[2], "package.json"), JSON.stringify({ name: "@paperclipai/db", version: "0.3.1" }));
+        fs.copyFileSync(path.join(args[1], "package.json"), path.join(args[2], "package.json"));
         return { stdout: "", stderr: "" };
       }
       if (file === process.execPath) return { stdout: "0.3.1\n", stderr: "" };
@@ -178,7 +180,7 @@ describe("managed install commands", () => {
       file === "corepack" ||
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
-    expect(buildCalls).toHaveLength(9);
+    expect(buildCalls).toHaveLength(10);
     for (const call of buildCalls) {
       const env = call[2]?.env;
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();
@@ -186,6 +188,45 @@ describe("managed install commands", () => {
     }
     const uiPackCall = buildCalls.find(([file, , options]) => file === "corepack" && options?.env?.PAPERCLIP_RELEASE_REUSE_UI_DIST === "1");
     expect(uiPackCall).toBeDefined();
+  });
+
+  it.each([false, true])("builds fresh UI before staging a bundled server (UI failure: %s)", async (uiFails) => {
+    const sha = "e".repeat(40);
+    const paths = resolveInstallStorePaths();
+    const delegate = createGitCheckoutRunCommand(sha);
+    let serverUi: string | undefined;
+    let copiedUi: string | undefined;
+    const runCommand: CommandRunner = async (file, args, options) => {
+      if (file === "tar") {
+        const result = await delegate(file, args, options);
+        const serverRoot = path.join(args[args.indexOf("-C") + 1], "server");
+        const manifestPath = path.join(serverRoot, "package.json");
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+        // Match the shipped server: staging copies files before npm prepack.
+        fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, files: ["ui-dist"], bundleDependencies: ["acpx"] }));
+        serverUi = path.join(serverRoot, "ui-dist", "index.html");
+        expect(fs.existsSync(serverUi)).toBe(false);
+        return result;
+      }
+      if (file === "bash" && args[0] === "scripts/prepare-server-ui-dist.sh") {
+        if (uiFails) throw new Error("fixture UI build failed");
+        fs.mkdirSync(path.dirname(serverUi!), { recursive: true });
+        fs.writeFileSync(serverUi!, "fresh UI for selected commit");
+      }
+      if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs") && path.basename(args[1]) === "server") {
+        copiedUi = fs.readFileSync(serverUi!, "utf8");
+      }
+      return delegate(file, args, options);
+    };
+    if (uiFails) {
+      await expect(installGitPayload("paperclipai/paperclip", sha, runCommand, paths)).rejects.toThrow("fixture UI build failed");
+      expect(copiedUi).toBeUndefined();
+      expect(fs.existsSync(payloadPathFor(paths, "git", sha.slice(0, 12)))).toBe(false);
+    } else {
+      await expect(installGitPayload("paperclipai/paperclip", sha, runCommand, paths)).resolves.toMatchObject({ reused: false });
+      expect(copiedUi).toBe("fresh UI for selected commit");
+    }
+    expect(fs.existsSync(paths.currentPath)).toBe(false);
   });
 
   it("resolves the complete server workspace dependency closure in dependency order", () => {

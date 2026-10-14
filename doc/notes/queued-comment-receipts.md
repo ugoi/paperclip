@@ -97,10 +97,18 @@ without a reload, followed by another real pending input.
 The handoff report identifies the final reviewed commit and independent QA.
 Source and tests are retained in the local branch and internal Git bundle; do not hotpatch production
 `dist` files or silently return to the older local checkout. A managed git
-payload pinned to the reviewed commit is the supported source-build path:
+payload pinned to the reviewed commit is the supported source-build path.
+The installed baseline CLI omits the UI build before staging a bundled server;
+the complete rehearsal exposed an ENOENT for `server/ui-dist`. Use the corrected
+CLI built from a disposable checkout of the reviewed commit for the initial
+upgrade, rather than invoking the old installed CLI. Build that bootstrap CLI
+with Node 24, `pnpm install --frozen-lockfile`, then
+`bash scripts/build-npm.sh --skip-checks --skip-typecheck` after the separately
+recorded checks have passed. The installer now explicitly prepares the static UI
+before copying bundled server files and aborts if the UI build fails.
 
 ```sh
-paperclipai install --repo ugoi/paperclip --ref <reviewed-full-commit> --yes
+PAPERCLIP_BUILD_COMMIT=<reviewed-full-commit> node <disposable-checkout>/cli/dist/index.js install --repo ugoi/paperclip --ref <reviewed-full-commit> --yes
 ```
 
 This command builds and changes the managed `current` pointer. It is a rollout
@@ -125,6 +133,7 @@ Confirm the previous entry is the retained `2026.1007.0-nightly.0` payload befor
 executing it. This patch adds JSON fields but no schema changes; rollback ignores
 those extra fields, and restores the old product behavior. A payload rollback is
 not a database restore. If later packaging introduces migrations, reassess the
-backup/restore boundary first. An explicit update to a different official npm
-version can replace the fix; rebase and re-run these regressions before changing
-the reviewed pin. No NixOS change is required by this source patch.
+backup/restore boundary first. Ordinary updates preserve a full Git-SHA pin,
+including when npm-version flags are supplied; the git-pin branch returns before
+remote resolution. Deliberately installing another source or changing the pin
+requires re-running these regressions. No NixOS change is required by this source patch.
