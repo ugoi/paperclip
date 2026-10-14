@@ -63,6 +63,35 @@ it('continues after an interrupted write without replaying that write', async ()
   expect(await fs.readFile(path.join(root, 'writes'), 'utf8')).toBe(before);
   expect((await fs.readFile(path.join(root, 'completed'), 'utf8')).trim()).toBe('follow-up');
 }, 15000);
+
+it('refreshes run authority through two consecutive interrupted continuations', async () => {
+  const { root, ctx, abort, started, execute } = await setup();
+  ctx.authToken = 'initial-token';
+  ctx.config.env = { ...(ctx.config.env as object), PAPERCLIP_STOP_FIXTURE_HOLD_FIRST_FOLLOWUP: '1' };
+  const first = execute(ctx);
+  await started;
+  abort.abort();
+  const firstResult = await first;
+  const secondAbort = new AbortController();
+  let accepted!: () => void;
+  const secondStarted = new Promise<void>(resolve => { accepted = resolve; });
+  const second = execute({ ...ctx, runId: 'second', authToken: 'second-token', signal: secondAbort.signal,
+    runtime: { sessionParams: sessionCodec.serialize(firstResult.sessionParams ?? null) },
+    onLog: async (_stream, text) => { if (text.includes('Accepted first follow-up.')) accepted(); },
+  });
+  await secondStarted;
+  secondAbort.abort();
+  const secondResult = await second;
+  const third = await execute({ ...ctx, runId: 'third', authToken: 'third-token', signal: undefined,
+    runtime: { sessionParams: sessionCodec.serialize(secondResult.sessionParams ?? null) },
+  });
+  expect(third.exitCode, JSON.stringify(third)).toBe(0);
+  const launches = (await fs.readFile(path.join(root, 'run-env'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  expect(launches.map(launch => launch.runId)).toEqual(['stop-test', 'second', 'third']);
+  expect(launches.map(launch => launch.tokenHash)).toEqual(['initial-token', 'second-token', 'third-token'].map(token => createHash('sha256').update(token).digest('hex')));
+  const prompts = (await fs.readFile(path.join(root, 'prompts'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  expect(new Set(prompts.map(prompt => prompt.sessionId)).size).toBe(1);
+}, 30_000);
 it('does not dispatch a provider when Stop precedes startup', async () => {
   const { root, ctx, abort, execute } = await setup();
   abort.abort(new Error('Stopped before startup'));

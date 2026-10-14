@@ -78,13 +78,23 @@ for (const { unfinishedWrite, stopResponse, holdFirstFollowup } of [
         await expect.poll(async () => JSON.stringify(await json(await request.get(`/api/issues/${issue.id}/queued-comments`))), { timeout: 20_000 }).toContain("Now check the second saved request.");
         await expect(page.getByRole("button", { name: "Interrupt", exact: true })).toBeEnabled();
         await testInfo.attach("received-input-removed-next-queue-operable", { body: await page.screenshot(), contentType: "image/png" });
-        await page.getByRole("button", { name: "Interrupt", exact: true }).click();
+        // A click can return while the server is still joining the old provider.
+        // Start the response deadline after durable acknowledgement; otherwise
+        // fixture cleanup can archive the company during valid admission.
+        const [acknowledgement] = await Promise.all([
+          page.waitForResponse(response => response.url().endsWith("/queued-comments/interrupt") && response.request().method() === "POST", { timeout: 60_000 }),
+          page.getByRole("button", { name: "Interrupt", exact: true }).click(),
+        ]);
+        await json(acknowledgement);
       }
       await expect(page.getByText("Answered the pending follow-up once.", { exact: false })).toBeVisible({ timeout: 30_000 });
       await expect.poll(async () => (await json(await request.get(`/api/issues/${issue.id}/live-runs`))).length, { timeout: 30_000 }).toBe(0);
       const prompts = (await readFile(path.join(root, "prompts"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
       expect(prompts).toHaveLength(holdFirstFollowup ? 3 : 2);
       expect(new Set(prompts.map(prompt => prompt.sessionId)).size).toBe(1);
+      const launches = (await readFile(path.join(root, "run-env"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      expect(new Set(launches.map(launch => launch.runId)).size).toBe(prompts.length);
+      expect(new Set(launches.map(launch => launch.tokenHash)).size).toBe(prompts.length);
       // Interrupt delivers immediately; after Stop, the new direction includes saved input.
       const continuationPrompts = prompts.slice(1);
       expect(JSON.stringify(continuationPrompts)).toContain("List my recent Drive files.");
@@ -96,6 +106,7 @@ for (const { unfinishedWrite, stopResponse, holdFirstFollowup } of [
       if (unfinishedWrite) expect(await readFile(path.join(root, "writes"), "utf8")).toBe(writesAtStop);
       await expect(page.getByRole("dialog")).toHaveCount(0);
     } finally {
+      await testInfo.attach("provider-run-identities", { body: await readFile(path.join(root, "run-env"), "utf8").catch(() => ""), contentType: "application/json" });
       if (testInfo.status !== testInfo.expectedStatus) {
         const tasks = await json(await request.get(`/api/companies/${company.id}/issues`));
         for (const task of tasks) {
