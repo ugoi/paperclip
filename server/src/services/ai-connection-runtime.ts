@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { HttpError, unprocessable } from "../errors.js";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -18,6 +18,7 @@ import { WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "@paperclipai/adapter-utils/
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 import { decideGrokAuthMerge } from "@paperclipai/adapter-grok-local/server";
+import { readManagedAiCredentialSnapshot, withManagedAiCredentialComparison } from "./managed-ai-credential-snapshot.js";
 
 export function isAiConnectionBusy(error: unknown): error is HttpError {
   return error instanceof HttpError && error.status === 422 &&
@@ -299,7 +300,7 @@ export async function prepareManagedAiRuntime(
     })();
     home = await mkdtemp(
       path.join(
-        os.tmpdir(),
+        await realpath(os.tmpdir()),
         `paperclip-ai-${input.companyId}-${selection.grant.id}-`,
       ),
     );
@@ -376,7 +377,7 @@ export async function prepareManagedAiRuntime(
       home,
       cleanup: async () => {
         if (subscriptionFile) {
-          const refreshed = await readFile(authFile, "utf8");
+          const refreshed = await readManagedAiCredentialSnapshot(authFile);
           if (refreshed !== value) {
             // A quota exchange can hold this company lock for 60 seconds.
             // Retry its 30-second acquisition timeout without discarding the
@@ -418,19 +419,14 @@ export async function prepareManagedAiRuntime(
               const current = await aiConnectionService(
                 tx as unknown as Db,
               ).credential({ ...selection, grant });
-              const destination = path.join(
-                providerHome,
-                "current-auth.json",
-              );
-              await writeFile(destination, current, { mode: 0o600 });
-              const decision =
+              const decision = await withManagedAiCredentialComparison(refreshed, current, (source, destination) =>
                 input.binding.provider === "openai"
-                  ? await decideCodexAuthMerge(authFile, destination, {
+                  ? decideCodexAuthMerge(source, destination, {
                       errorLabel: "AI account refresh",
                     })
-                  : await decideGrokAuthMerge(authFile, destination, {
+                  : decideGrokAuthMerge(source, destination, {
                       errorLabel: "AI account refresh",
-                    });
+                    }));
               if (decision !== 10) return;
               await secretService(tx).rotate(
                 ref.secretId,

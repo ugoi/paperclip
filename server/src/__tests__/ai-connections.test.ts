@@ -608,6 +608,37 @@ describe("managed AI connections", () => {
     await expect(access(run.home!)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("never follows child-created links during native refresh write-back", async () => {
+    const owner = "managed-symlink-refresh";
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const auth = (hour: string) => JSON.stringify({ tokens: { account_id: owner, id_token: "identity", access_token: `access-${hour}`, refresh_token: `refresh-${hour}` }, last_refresh: `2026-09-10T${hour}:00:00Z` });
+    await service.save(companyId, owner, { provider: "openai", method: "subscription", ownership: "personal", name: owner, loginSessionId: "fixture", agentIds: [], allAgents: true }, auth("10"));
+    const run = await prepareManagedAiRuntime(db, { companyId, agentId, responsibleUserId: owner, adapterType: "codex_local", binding: { provider: "openai", method: "subscription", mode: "responsible_user" }, config: {} });
+    const provider = String(run.config.env.CODEX_HOME);
+    const canary = path.join(home, "managed-writeback-canary");
+    await writeFile(canary, "do-not-overwrite", { mode: 0o600 });
+    await fs.symlink(canary, path.join(provider, "current-auth.json"));
+    const replacement = path.join(provider, "replacement.json");
+    await writeFile(replacement, auth("11"), { mode: 0o600 });
+    await fs.rename(replacement, path.join(provider, "auth.json"));
+    await run.cleanup();
+    expect(await readFile(canary, "utf8")).toBe("do-not-overwrite");
+    const [row] = await service.quotaAccounts(companyId, owner);
+    expect(await service.credential(row)).toBe(auth("11"));
+
+    const bad = await prepareManagedAiRuntime(db, { companyId, agentId, responsibleUserId: owner, adapterType: "codex_local", binding: { provider: "openai", method: "subscription", mode: "responsible_user" }, config: {} });
+    const badAuth = path.join(String(bad.config.env.CODEX_HOME), "auth.json");
+    await fs.rename(badAuth, badAuth + ".retained");
+    await fs.symlink(canary, badAuth);
+    await expect(bad.cleanup()).rejects.toThrow("private, stable regular file");
+    expect(await service.credential(row)).toBe(auth("11"));
+    expect(await readFile(canary, "utf8")).toBe("do-not-overwrite");
+    expect(await readFile(badAuth + ".retained", "utf8")).toBe(auth("11"));
+    await fs.unlink(badAuth);
+    await fs.rename(badAuth + ".retained", badAuth);
+    await bad.cleanup();
+  });
+
   it("serializes quota exchange with a concurrent secret edit and runtime credential read", async () => {
     const owner = "quota-race-owner";
     await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
