@@ -33,3 +33,17 @@ Validation on 2026-10-19:
 The production rollout uses the official `paperclipai service restart`, which
 records active-run adoption. Retain the prior module bytes for rollback and
 verify the hot-restart report plus actual API/browser latency after activation.
+
+
+Activation succeeded for the bounded module hotfix. Direct authenticated API
+checks returned dashboard in 344 ms and attention in 945 ms; the browser rendered
+the dashboard with no JavaScript errors. Concurrent startup/API traffic still
+costs several seconds, so these timings are not a full-page latency guarantee.
+
+The Linux service manager's default `KillMode=control-group` interrupted two
+existing runs before Paperclip wrote its shutdown snapshot. The built-in recovery
+continued both tasks automatically. The empty restart report alone was misleading
+because the snapshot was missing; the actual run records revealed `process_lost`.
+The host configuration now declares `KillMode=process` to allow the server to
+manage its ordered DB/worker shutdown. See `ugoi/homelab` operational record
+`docs/service-loading-20261019.md` for precise evidence, rollout and limitations.
