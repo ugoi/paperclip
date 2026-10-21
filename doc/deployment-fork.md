@@ -31,6 +31,14 @@ SSH environment and `homeMode: "preconfigured"`. Ordinary agents keep their
 existing policy, and planning remains read-only. Remote home selection is explicit
 and checked on the remote host; controller paths never implicitly select it.
 
+The first deployed fork also reproduced a distinct startup failure: remote staging
+and mandatory identity probes consumed the 30-second `run.prepare` deadline
+before the worker started. A deterministic delayed-launch test preserves that
+failure. Launch readiness now has its own bootstrap-lifetime bound, followed by
+the unchanged provider command budget. Cancellation during staging prevents late
+launch; cancellation crossing dispatch retains exact process cleanup ownership.
+Both fresh startup and session recovery exercise this boundary.
+
 ## Building and operating
 
 Build the Linux Core from the normal `Dockerfile`, supplying the full reviewed Git

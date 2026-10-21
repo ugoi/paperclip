@@ -4751,6 +4751,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   async #closeAndSettle(): Promise<void> {
     this.#closed = true;
     this.#resolveClosedSignal();
+    this.#handle?.cancelPendingLaunch?.();
     const { preparationDeadline, closeDeadline } = runnerCloseDeadlines(Date.now(), runnerCloseGraceMs(this.options));
     let preparationConfirmed = true;
     const attachmentPending = this.#attachmentOperation !== null;
@@ -4783,9 +4784,11 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       runnerLifecycle: string | null;
       runnerIdentityMatches: boolean | null;
     } | null = null;
+    const pendingProcessLaunch = !this.#startupComplete && this.#handle?.launchReady !== undefined
+      && this.#handle.child.pid === undefined;
     if (
       this.#core !== null &&
-      (this.#handle !== null || adoptedRunner !== undefined) &&
+      ((this.#handle !== null && !pendingProcessLaunch) || adoptedRunner !== undefined) &&
       (adoptedRunner === undefined || this.#adoptedRunnerAuthenticated) &&
       (this.#failure === null || this.#startupComplete)
     ) {
@@ -5333,7 +5336,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       await release?.();
     }
     this.#assertStartupOpen();
-    const admissionDeadline = this.#coldAdmissionDeadline();
+    const launchDeadline = Date.now() + RUNNER_BOOTSTRAP_TICKET_TTL_MS;
     const bootstrapTicket = core.issueBootstrapTicket(RUNNER_BOOTSTRAP_TICKET_TTL_MS);
     await core.flushCheckpoint();
     this.#assertStartupOpen();
@@ -5364,6 +5367,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#handle = handle;
     this.#watchRunner(handle);
     await this.#publishSpawnedProcess(handle);
+    await this.#awaitRunnerLaunch(handle, launchDeadline);
+    const admissionDeadline = this.#coldAdmissionDeadline();
     this.#assertStartupOpen();
     await registration?.activate?.();
     this.#assertStartupOpen();
@@ -6088,6 +6093,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       await this.options.authorizeWarmTransitionRecovery?.("before_bootstrap");
     }
     this.#assertStartupOpen();
+    const launchDeadline = Date.now() + RUNNER_BOOTSTRAP_TICKET_TTL_MS;
     const bootstrapTicket = adoptedRunner
       ? null
       : warmRecovery
@@ -6105,9 +6111,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     }
     // A replacement executor restores its cold provider before acknowledging recovery.
     this.#assertStartupOpen();
-    const admissionDeadline = this.#sourceAttachmentDeadline === null
-      ? this.#coldAdmissionDeadline(adoptedRunner === undefined)
-      : Math.min(Date.now() + 30_000, this.#sourceAttachmentDeadline);
     const handle = adoptedRunner
       ? null
       : spawnRunner({
@@ -6151,7 +6154,11 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       this.#handle = handle;
       this.#watchRunner(handle);
       await this.#publishSpawnedProcess(handle);
+      await this.#awaitRunnerLaunch(handle, launchDeadline);
     }
+    const admissionDeadline = this.#sourceAttachmentDeadline === null
+      ? this.#coldAdmissionDeadline(adoptedRunner === undefined)
+      : Math.min(Date.now() + 30_000, this.#sourceAttachmentDeadline);
     this.#assertStartupOpen();
     let targetRecoveryActivated = registration === newTransitionRegistration;
     if (oldTransitionRegistration && newTransitionRegistration) {
@@ -7634,6 +7641,31 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#throwIfFailed();
 
     }
+
+  async #awaitRunnerLaunch(handle: RunnerProcessHandle, deadline: number): Promise<void> {
+    this.#assertStartupOpen();
+    if (handle.launchReady === undefined) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Staging has its own bound, constrained by the existing bootstrap
+      // ticket lifetime. Provider command budgets begin only after launch.
+      await Promise.race([
+        handle.launchReady,
+        this.#failureSignal,
+        this.#closedSignal.then(() => { this.#assertStartupOpen(); }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("runner_process_launch_timed_out")), Math.max(0, deadline - Date.now()));
+        }),
+      ]);
+      this.#assertStartupOpen();
+      this.#throwIfFailed();
+    } catch (error) {
+      handle.cancelPendingLaunch?.();
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   #diagnostic(message: string): void {
     message = redactObservabilityDiagnostic(message, this.options.environment, this.options.observability?.otelConfig);
