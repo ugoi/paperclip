@@ -1,0 +1,127 @@
+name: Stefan production image
+
+on:
+  push:
+    branches: [deploy/stefan-production]
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: stefan-production-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disposable runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Build the complete source revision
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: production
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/ugoi/paperclip:core-${{ github.sha }}
+          build-args: |
+            PAPERCLIP_BUILD_COMMIT=${{ github.sha }}
+            PAPERCLIP_BUILD_VERSION=stefan-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/ugoi/paperclip
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  darwin:
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test the same revision for macOS arm64
+        working-directory: packages/paperclip-runner
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          rustup show
+          cargo test --release --locked --manifest-path runner/Cargo.toml -p paperclip-runner-core --lib trusted_host
+          cargo build --release --locked --manifest-path runner/Cargo.toml -p paperclip-runner-core --bin paperclip-runnerd
+          mkdir -p "$RUNNER_TEMP/darwin-runner"
+          cp runner/target/release/paperclip-runnerd "$RUNNER_TEMP/darwin-runner/"
+          "$RUNNER_TEMP/darwin-runner/paperclip-runnerd" --build-metadata > "$RUNNER_TEMP/darwin-runner/build-metadata.json"
+          cd "$RUNNER_TEMP/darwin-runner"
+          shasum -a 256 paperclip-runnerd > SHA256SUMS
+          printf '%s\n' "$GITHUB_SHA" > SOURCE_REVISION
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: darwin-runner-${{ github.sha }}
+          path: ${{ runner.temp }}/darwin-runner/
+          if-no-files-found: error
+
+  image:
+    needs: [core, darwin]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: darwin-runner-${{ github.sha }}
+          path: ${{ runner.temp }}/darwin-runner
+      - name: Verify artifact revision and checksum
+        id: darwin
+        working-directory: ${{ runner.temp }}/darwin-runner
+        run: |
+          set -euo pipefail
+          test "$(cat SOURCE_REVISION)" = "$GITHUB_SHA"
+          sha256sum -c SHA256SUMS
+          echo "sha256=$(sha256sum paperclip-runnerd | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Publish immutable candidate with both worker platforms
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.remote-runner
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/ugoi/paperclip:stefan-${{ github.sha }}
+          build-contexts: |
+            darwin-runner=${{ runner.temp }}/darwin-runner
+          build-args: |
+            PAPERCLIP_CORE_IMAGE=ghcr.io/ugoi/paperclip@${{ needs.core.outputs.digest }}
+            DARWIN_RUNNER_SHA256=${{ steps.darwin.outputs.sha256 }}
+      - name: Record candidate identity
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          DARWIN_SHA256: ${{ steps.darwin.outputs.sha256 }}
+        run: |
+          printf 'Source: `%s`\n\nImage: `ghcr.io/ugoi/paperclip@%s`\n\nDarwin SHA-256: `%s`\n\nDeployment requires separate acceptance and an explicit Compose digest update.\n' "$GITHUB_SHA" "$IMAGE_DIGEST" "$DARWIN_SHA256" >> "$GITHUB_STEP_SUMMARY"

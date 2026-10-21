@@ -45,6 +45,30 @@ import {
 import { rehydrateRunnerdItemNotification } from "../../live/runnerd-codex-transport.js";
 
 describe("Codex app-server Codex driver", () => {
+  it.each(["ordinary", "trusted-host", "trusted-host-plan"] as const)("records the selected host and network authority in session context (%s)", async mode => {
+    const transport = new FakeCodexTransport();
+    const unrestricted = mode === "trusted-host";
+    const planning = mode === "trusted-host-plan";
+    const session = await makeDriver([transport], {
+      trustedHostFullAccess: mode !== "ordinary",
+      requestedCollaborationMode: planning ? "plan" : "default",
+      environment: {
+        PATH: "/bin", HOME: "/isolated/home", CODEX_HOME: "/isolated/codex",
+        PAPERCLIP_RUNNER_HOME_MODE: "preconfigured", PAPERCLIP_RUNNER_NETWORK_ACCESS: "disabled",
+      },
+    }).openSession({ runId: "run-context-authority", normalizedSessionId: "normalized-context-authority", workingDirectory: WORKSPACE });
+    try {
+      const first = await session.events()[Symbol.asyncIterator]().next();
+      expect(first.value).toMatchObject({ eventType: "session.started", payload: { context: { sandbox: {
+        permissionProfile: { id: unrestricted ? "paperclip-runner-trusted-host" : planning ? "paperclip-runner-workspace-read-only" : "paperclip-runner-workspace-only" },
+        rootAccess: unrestricted ? "write" : "none",
+        minimalRuntimeAccess: unrestricted ? "write" : "read",
+        workspaceAccess: planning ? "read" : "write",
+        networkAccess: unrestricted,
+      } } } });
+    } finally { await session.close({ reason: "context authority fixture complete" }); }
+  });
+
   it.each(["default", "disabled"] as const)("rejects unsupported reasoning %s without sending a turn RPC", async reasoningMode => {
     const transport = new FakeCodexTransport();
     const session = await makeDriver([transport]).openSession({

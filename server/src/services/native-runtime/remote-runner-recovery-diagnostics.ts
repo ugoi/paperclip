@@ -1,3 +1,5 @@
+import { remoteRecoveryGenerationCheck, REMOTE_RECOVERY_LIVENESS_CHECK_SCRIPT } from "./remote-runner-process-probe.js";
+
 export const REMOTE_RUNNER_RECOVERY_ERROR_CODE = "runner_remote_process_identity_unavailable";
 
 const stages = ["runner_state", "identity_marker", "process_verification"] as const;
@@ -62,42 +64,9 @@ export function readRemoteRunnerRecoveryError(error: unknown): RemoteRunnerRecov
 export const REMOTE_RECOVERY_MARKER_READ_SCRIPT =
   'test ! -L "$1" || exit 32; test -f "$1" || exit 31; cat -- "$1" || exit 33';
 
-function remoteRecoveryGenerationCheck(zombieOnly: boolean) {
-  return `node -e '
-const fs = require("node:fs");
-const [pid, expected] = process.argv.slice(1);
-try {
-  const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
-  const end = stat.lastIndexOf(") ");
-  if (end < 0 || !stat.startsWith(pid + " (")) process.exit(46);
-  const fields = stat.slice(end + 2).trim().split(/\\s+/);
-  if (${zombieOnly} && fields[0] !== "Z") process.exit(44);
-  const ticks = fields[19];
-  const boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-  if (!ticks || !/^[0-9]+$/.test(ticks) || !boot) process.exit(46);
-  if ("linux:" + boot + ":" + ticks !== expected) process.exit(47);
-  process.exit(fields[0] === "Z" ? 45 : 0);
-} catch (error) {
-  if (error && error.code === "ENOENT") {
-    try { process.kill(Number(pid), 0); }
-    catch (probeError) {
-      if (probeError && probeError.code === "ESRCH") process.exit(45);
-    }
-  }
-  process.exit(46);
-}
-' "$pid" "\${5:-}"`;
-}
-
 const REMOTE_RECOVERY_ZOMBIE_CHECK_SCRIPT = remoteRecoveryGenerationCheck(true);
 
 export const REMOTE_RECOVERY_PROCESS_FINGERPRINT_CHECK_SCRIPT = remoteRecoveryGenerationCheck(false);
-
-const REMOTE_RECOVERY_LIVENESS_CHECK_SCRIPT = `node -e '
-const pid = process.argv[1];
-try { process.kill(Number(pid), 0); }
-catch (error) { process.exit(error && error.code === "ESRCH" ? 45 : 46); }
-' "$pid"`;
 
 export const REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT = [
   "set -eu",

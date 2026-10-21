@@ -9097,11 +9097,14 @@ it("aborts startup promptly on close while allowing the owned cleanup command to
     await drain;
   } finally { vi.useRealTimers(); }
 });
-it("launches and closes native Codex without materializing or editing the preconfigured home", async () => {
+it.each(["ordinary", "trusted-host", "trusted-host-plan"] as const)("launches and closes native Codex without materializing or editing the preconfigured home (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "runner-preconfigured-launch-"));
   const home = join(root, "user-home");
   const codexHome = join(home, ".codex");
   const stateDirectory = join(root, "session");
+  const calls = join(root, "calls.jsonl");
+  const trustedHostFullAccess = mode !== "ordinary";
+  const readOnly = mode === "trusted-host-plan";
   await mkdir(codexHome, { recursive: true });
   await mkdir(stateDirectory);
   const config = 'approval_policy = "never"\n';
@@ -9110,11 +9113,24 @@ it("launches and closes native Codex without materializing or editing the precon
   await writeFile(join(codexHome, "auth.json"), auth);
   const bundle = createCapabilityRunnerdCodexTransport({
     homeMode: "preconfigured", environment: { ...process.env, HOME: home, CODEX_HOME: codexHome },
+    trustedHostFullAccess,
     runnerBinary: resolve(import.meta.dirname, "../../runner/target/debug/paperclip-runnerd"),
-    codexCommand: fakeCodex, codexArgs: fakeCodexArgs(stateDirectory), stateDirectory,
+    codexCommand: fakeCodex, codexArgs: fakeCodexArgs(stateDirectory, "--request-log", calls), stateDirectory,
   });
   try {
-    await bundle.transport.request("thread/start", { cwd: stateDirectory, model: "gpt-5.6-sol", dynamicTools: [] });
+    await bundle.transport.request("thread/start", { cwd: stateDirectory, model: "gpt-5.6-sol", dynamicTools: [],
+      ...(readOnly ? { permissions: "paperclip-runner-workspace-read-only" } : {}) });
+    const state = JSON.parse(await readFile(join(stateDirectory, "runner", "codex-provider-state.json"), "utf8"));
+    expect(Boolean(state.config.trustedHostFullAccess)).toBe(trustedHostFullAccess && !readOnly);
+    const requests = (await readFile(calls, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const thread = requests.find(value => value.method === "thread/start").params;
+    if (trustedHostFullAccess && !readOnly) {
+      expect(thread.sandbox).toBe("danger-full-access");
+      expect(thread).not.toHaveProperty("permissions");
+    } else {
+      expect(thread.permissions).toBe(readOnly ? "paperclip-runner-workspace-read-only" : "paperclip-runner-workspace-only");
+      expect(thread).not.toHaveProperty("sandbox");
+    }
     await bundle.transport.close();
     expect(await readFile(join(codexHome, "config.toml"), "utf8")).toBe(config);
     expect(await readFile(join(codexHome, "auth.json"), "utf8")).toBe(auth);

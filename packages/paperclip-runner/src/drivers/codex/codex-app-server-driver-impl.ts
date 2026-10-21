@@ -286,6 +286,7 @@ export class CodexAppServerDriver implements HarnessDriver {
             this.#options.includeCollaborationModeInstructions ?? true,
             this.#options.includeSkillInstructions ?? false,
             this.#options.environment,
+            this.#options.trustedHostFullAccess === true,
           ),
           approvalPolicy: this.#options.approvalPolicy ?? "never",
           ...(this.#options.model ? { model: this.#options.model } : {}),
@@ -419,6 +420,7 @@ export class CodexAppServerDriver implements HarnessDriver {
             this.#options.includeCollaborationModeInstructions ?? true,
             this.#options.includeSkillInstructions ?? false,
             this.#options.environment,
+            this.#options.trustedHostFullAccess === true,
           ),
           ...this.#instructionParams(this.#direct() ? "" : this.#baseInstructions()),
           approvalPolicy: this.#options.approvalPolicy ?? "never",
@@ -828,8 +830,9 @@ export class CodexAppServerDriver implements HarnessDriver {
     const activePermissionProfile = record(thread.activePermissionProfile);
     const permissionProfileId = text(activePermissionProfile.id);
     const requestedMode = this.#options.requestedCollaborationMode ?? "default";
+    const trustedHostFullAccess = this.#options.trustedHostFullAccess === true && requestedMode === "default";
     const requiredPermissionProfile =
-      text(createSecuredCodexThreadParams(workingDirectory, requestedMode, true, false, this.#options.environment).permissions);
+      text(createSecuredCodexThreadParams(workingDirectory, requestedMode, true, false, this.#options.environment, this.#options.trustedHostFullAccess === true).permissions);
     if (
       permissionProfileId.length > 0 &&
       permissionProfileId !== requiredPermissionProfile
@@ -872,10 +875,10 @@ export class CodexAppServerDriver implements HarnessDriver {
         sandbox: {
           permissionProfile: boundedCodexValue(configuredPermissionProfile),
           legacyPolicy: boundedCodexValue(response.sandbox ?? null),
-          rootAccess: "none",
-          minimalRuntimeAccess: "read",
+          rootAccess: trustedHostFullAccess ? "write" : "none",
+          minimalRuntimeAccess: trustedHostFullAccess ? "write" : "read",
           workspaceAccess: requestedMode === "plan" ? "read" : "write",
-          networkAccess: codexNetworkAccess(this.#options.environment),
+          networkAccess: trustedHostFullAccess || codexNetworkAccess(this.#options.environment),
           githubAuthenticationMode: this.#options.environment?.PAPERCLIP_GITHUB_AUTH_MODE ?? "managed",
         },
         approvalPolicy: boundedCodexValue(

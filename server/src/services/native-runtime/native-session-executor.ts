@@ -116,6 +116,9 @@ import {
 import { adapterExecutionTargetEnablesSandboxDuplexBridge, type AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { createNativeSshCommandRunner } from "./native-ssh-command-runner.js";
 import { discoverRemoteExecutable, parseRemoteExecutableCandidate } from "./codex-model-fallback.js";
+import { resolveRemotePreconfiguredHome } from "./remote-preconfigured-home.js";
+import { REMOTE_RUNNER_FAILED_IDENTITY_CLEANUP_SCRIPT } from "./remote-runner-process-cleanup.js";
+import { REMOTE_RUNNER_PROCESS_FINGERPRINT_SCRIPT, REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT, isRemoteRunnerProcessFingerprint } from "./remote-runner-process-probe.js";
 export { parseRemoteExecutableCandidate } from "./codex-model-fallback.js";
 import type { CommandManagedRuntimeRunner } from "@paperclipai/adapter-utils/command-managed-runtime";
 import { createNativeRunnerExecutionDriver, resolveRemoteRunnerTransportMode } from "./native-runner-execution-driver.js";
@@ -10884,21 +10887,13 @@ async function readRemoteRunnerProviderState(input: {
 const REMOTE_RUNNER_PROCESS_IDENTITY_WAIT_MS = 20_000;
 const REMOTE_RUNNER_PROCESS_POLL_MS = 1_000;
 
-// Linux boot identity plus start ticks identifies a process generation across
-// PID reuse. exec preserves both the launch shell's PID and its start ticks.
-const REMOTE_RUNNER_PROCESS_FINGERPRINT_SCRIPT =
-  "process_fingerprint=$(node -e 'const fs=require(\"node:fs\");try{const stat=fs.readFileSync(\"/proc/\"+process.argv[1]+\"/stat\",\"utf8\");const end=stat.lastIndexOf(\") \");const ticks=stat.slice(end+2).trim().split(/\\s+/)[19];const boot=fs.readFileSync(\"/proc/sys/kernel/random/boot_id\",\"utf8\").trim();if(end<0||!/^\\d+$/.test(ticks||\"\")||!/^[-a-fA-F0-9]+$/.test(boot))process.exit(4);process.stdout.write(\"linux:\"+boot+\":\"+ticks)}catch{process.exit(4)}' \"$pid\")";
-
 const REMOTE_RUNNER_IDENTITY_CHECK_SCRIPT =
   'set -eu; identity_path=$1; expected_nonce=$2; expected_runner_id=$3; expected_pid=$4; test -f "$identity_path" && test ! -L "$identity_path" || exit 3; { IFS= read -r nonce; IFS= read -r pid; IFS= read -r started_at; IFS= read -r runner_id; } < "$identity_path"; test "$nonce" = "$expected_nonce" && test "$runner_id" = "$expected_runner_id" && test "$pid" = "$expected_pid" && test -n "$started_at" || exit 4; kill -0 "$pid" 2>/dev/null || exit 3; if test -r "/proc/$pid/cmdline"; then command_line=$(tr "\\000" "\\n" < "/proc/$pid/cmdline"); printf "%s\\n" "$command_line" | grep -Fqx -- "--runner-id" || exit 4; printf "%s\\n" "$command_line" | grep -Fqx -- "$expected_runner_id" || exit 4; fi';
 
 export const REMOTE_RUNNER_CHILD_LAUNCH_SCRIPT =
-  'set -eu; identity_path=$1; identity_nonce=$2; runner_instance_id=$3; diagnostics_directory=$4; shift 4; umask 077; test ! -L "$diagnostics_directory"; if test -e "$diagnostics_directory"; then test -d "$diagnostics_directory"; else mkdir -p -- "$diagnostics_directory"; fi; chmod 0700 "$diagnostics_directory"; started_at=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"); pid=$$; process_fingerprint=""; if ' +
+  'set -eu; identity_path=$1; identity_nonce=$2; runner_instance_id=$3; diagnostics_directory=$4; shift 4; umask 077; test ! -L "$diagnostics_directory"; if test -e "$diagnostics_directory"; then test -d "$diagnostics_directory"; else mkdir -p -- "$diagnostics_directory"; fi; chmod 0700 "$diagnostics_directory"; started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ"); pid=$$; ' +
   REMOTE_RUNNER_PROCESS_FINGERPRINT_SCRIPT +
-  '; then :; else process_fingerprint=""; fi; identity_tmp="${identity_path}.tmp.$$"; printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$identity_nonce" "$$" "$started_at" "$runner_instance_id" "$process_fingerprint" > "$identity_tmp"; chmod 0600 "$identity_tmp"; mv -f -- "$identity_tmp" "$identity_path"; exec "$@"';
-
-const REMOTE_RUNNER_FAILED_IDENTITY_CLEANUP_SCRIPT =
-  'set -eu; identity_path=$1; expected_nonce=$2; expected_runner_id=$3; marker_wait=0; while { test ! -f "$identity_path" || test -L "$identity_path"; } && test "$marker_wait" -lt 50; do marker_wait=$((marker_wait + 1)); sleep 0.1; done; test -f "$identity_path" && test ! -L "$identity_path" || exit 3; { IFS= read -r nonce; IFS= read -r pid; IFS= read -r started_at; IFS= read -r runner_id; } < "$identity_path"; test "$nonce" = "$expected_nonce" && test "$runner_id" = "$expected_runner_id" && test -n "$started_at" || exit 4; case "$pid" in ""|*[!0-9]*) exit 4 ;; esac; test "$pid" -gt 0 || exit 4; if kill -0 "$pid" 2>/dev/null; then if test -r "/proc/$pid/cmdline"; then command_line=$(tr "\\000" "\\n" < "/proc/$pid/cmdline"); printf "%s\\n" "$command_line" | grep -Fqx -- "--runner-id" || exit 4; printf "%s\\n" "$command_line" | grep -Fqx -- "$expected_runner_id" || exit 4; fi; signal_target=$pid; if command -v ps >/dev/null 2>&1; then session_id=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d " ") || true; if test "$session_id" = "$pid"; then signal_target="-$pid"; fi; fi; kill -TERM -- "$signal_target" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true; term_wait=0; while kill -0 "$pid" 2>/dev/null && test "$term_wait" -lt 50; do term_wait=$((term_wait + 1)); sleep 0.1; done; if kill -0 "$pid" 2>/dev/null; then kill -KILL -- "$signal_target" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; kill_wait=0; while kill -0 "$pid" 2>/dev/null && test "$kill_wait" -lt 50; do kill_wait=$((kill_wait + 1)); sleep 0.1; done; fi; kill -0 "$pid" 2>/dev/null && exit 5; fi; test -f "$identity_path" && test ! -L "$identity_path" || exit 4; { IFS= read -r final_nonce; IFS= read -r final_pid; IFS= read -r final_started_at; IFS= read -r final_runner_id; } < "$identity_path"; test "$final_nonce" = "$nonce" && test "$final_pid" = "$pid" && test "$final_started_at" = "$started_at" && test "$final_runner_id" = "$runner_id" || exit 4; rm -f -- "$identity_path"';
+  ' || { printf \"%s\\n\" runner_process_probe_unavailable >&2; exit 46; }; test -n \"$process_fingerprint\" || exit 46; identity_tmp="${identity_path}.tmp.$$"; printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$identity_nonce" "$$" "$started_at" "$runner_instance_id" "$process_fingerprint" > "$identity_tmp"; chmod 0600 "$identity_tmp"; mv -f -- "$identity_tmp" "$identity_path"; exec "$@"';
 
 export function parseRemoteRunnerProcessIdentity(
   value: string,
@@ -10916,7 +10911,7 @@ export function parseRemoteRunnerProcessIdentity(
     pid <= 0 ||
     !startedAt ||
     Number.isNaN(new Date(startedAt).getTime()) ||
-    (processStartFingerprint !== undefined && !/^linux:[0-9a-f-]+:[0-9]+$/.test(processStartFingerprint))
+    (processStartFingerprint !== undefined && !isRemoteRunnerProcessFingerprint(processStartFingerprint))
   ) {
     return null;
   }
@@ -11128,6 +11123,7 @@ export function createRemoteRunnerProcessLauncher(input: {
       nonce: string;
       pid: number;
       startedAt: string;
+      processStartFingerprint?: string;
     } | null = null;
     const child: RunnerProcessHandle["child"] = {
       pid: undefined,
@@ -11150,12 +11146,15 @@ export function createRemoteRunnerProcessLauncher(input: {
           command: "sh",
           args: [
             "-c",
-            `${REMOTE_RUNNER_IDENTITY_CHECK_SCRIPT}; kill -${signal} "$expected_pid"`,
+            identity.processStartFingerprint
+              ? `${REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT}; ${REMOTE_RECOVERY_PROCESS_FINGERPRINT_CHECK_SCRIPT}; kill -${signal} "$expected_pid"`
+              : `${REMOTE_RUNNER_IDENTITY_CHECK_SCRIPT}; kill -${signal} "$expected_pid"`,
             "paperclip-runner-signal",
             input.processIdentityPath,
             identity.nonce,
             input.runnerInstanceId,
             String(identity.pid),
+            ...(identity.processStartFingerprint ? [identity.processStartFingerprint] : []),
           ],
           bypassSession: true,
           timeoutMs: 10_000,
@@ -11182,6 +11181,18 @@ export function createRemoteRunnerProcessLauncher(input: {
           );
         } else {
           await input.ensureArtifact();
+        }
+      }
+      // Supervision runs in the SSH account environment, while the child also
+      // receives provider configuration. Both must support the same proof.
+      for (const env of [undefined, processEnvironment(spec.environment)]) {
+        const prerequisite = await runner.execute({
+          command: "sh", args: ["-c", REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT],
+          cwd: input.target.remoteCwd, env,
+          bypassSession: true, timeoutMs: 10_000,
+        });
+        if (prerequisite.exitCode !== 0 || prerequisite.timedOut) {
+          throw new Error("runner_process_probe_unavailable");
         }
       }
       const launchStartedAtMs = Date.now();
@@ -11592,6 +11603,15 @@ async function createRunnerdBackendWithinSessionClaim(
   let recoveryPending = retainedTransition !== undefined;
   const target = input.runnerExecutionTarget ?? { kind: "local" as const };
   const remoteTarget = target.kind === "remote" ? target : null;
+  const trustedHostFullAccess = input.execution.provider.kind === "codex" &&
+    input.execution.provider.sandboxMode === "danger-full-access";
+  const remoteCodexHome = input.execution.provider.kind === "codex"
+    ? input.execution.provider.remoteCodexHome : undefined;
+  if ((trustedHostFullAccess || remoteCodexHome !== undefined) &&
+      (remoteTarget?.transport !== "ssh" || !("homeMode" in input.execution) ||
+       input.execution.homeMode !== "preconfigured")) {
+    throw new Error("runner_trusted_host_configuration_requires_preconfigured_ssh");
+  }
   const remoteCommandRunner = remoteTarget
     ? remoteTarget.transport === "ssh"
       ? createNativeSshCommandRunner({
@@ -12899,6 +12919,7 @@ async function createRunnerdBackendWithinSessionClaim(
           diagnosticsDirectory: posix.join(remoteSessionRoot!, "diagnostics"),
           runnerInstanceId: input.runnerInstanceId,
           ensureArtifact: ensureRemoteRunner,
+          requireProcessStartFingerprint: true,
           onSpawn: input.onSpawn,
           onLog: input.onLog,
           trace: input.trace,
@@ -12940,14 +12961,7 @@ async function createRunnerdBackendWithinSessionClaim(
   delete effectiveRunnerEnvironmentBase.PAPERCLIP_RUNNER_HOME_MODE;
   if (preconfiguredHome) {
     if (remoteCommandRunner) {
-      const discovered = await remoteCommandRunner.execute({
-        command: "sh", args: ["-c", 'getent passwd "$(id -u)" | cut -d: -f6'],
-        bypassSession: true, timeoutMs: 10_000,
-      });
-      const home = discovered.stdout.trim();
-      if (discovered.exitCode !== 0 || discovered.timedOut || !home.startsWith("/") || /[\0\r\n]/.test(home)) {
-        throw new Error("runner_preconfigured_remote_home_unavailable");
-      }
+      const { home, codexHome } = await resolveRemotePreconfiguredHome(remoteCommandRunner, remoteCodexHome);
       // Paths from the controller's account cannot select a remote account's config.
       const hostPathKeys = new Set(["CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]);
       const configured = configuredEnvironment(effectiveRunnerEnvironmentBase);
@@ -12958,6 +12972,7 @@ async function createRunnerdBackendWithinSessionClaim(
         );
       }
       effectiveRunnerEnvironmentBase.HOME = home;
+      if (codexHome) effectiveRunnerEnvironmentBase.CODEX_HOME = codexHome;
     } else {
       effectiveRunnerEnvironmentBase.HOME ??= userInfo().homedir;
     }
@@ -13235,6 +13250,7 @@ async function createRunnerdBackendWithinSessionClaim(
         runnerFilesystemRoot: remoteRunnerFilesystemRoot ?? undefined,
         resumeWorkingDirectory: runnerExecution.workspace.cwd,
         externallySandboxed: remoteTarget?.transport === "sandbox",
+        trustedHostFullAccess,
         opencodeRuntimeDirectory: remoteRunnerFilesystemRoot
           ? posix.join(remoteRunnerFilesystemRoot, "opencode")
           : undefined,

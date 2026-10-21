@@ -18,6 +18,7 @@ export interface RunnerProviderLaunchRequirements {
   model: string | null;
   approvalPolicy: "never" | "on-request" | "untrusted";
   readOnly: boolean;
+  trustedHostFullAccess?: boolean;
   preparedConversation: boolean;
   includeCollaborationModeInstructions: boolean;
   settings: Pick<CapabilityRunnerdCodexTransportOptions,
@@ -46,8 +47,10 @@ export function runnerProviderLaunchRequirements(
   runtimeContext: NativeRuntimeContextSnapshot | null,
   instructions: string,
 ): RunnerProviderLaunchRequirements {
+  if (options.trustedHostFullAccess && options.provider && options.provider !== "codex") throw new Error("trusted_host_requires_codex");
   const requirements: RunnerProviderLaunchRequirements = {
     schema: "paperclip.runner.launch-requirements.v1",
+    ...(options.trustedHostFullAccess === true ? { trustedHostFullAccess: true } : {}),
     identity, provider: options.provider ?? "codex",
     model: typeof params.model === "string" ? params.model : null,
     instructions, runtimeContext,
@@ -107,7 +110,8 @@ export function validatePreparedRunnerLaunch(
   if (!requirements.runtimeContext && descriptor.runtimeContext != null) reject();
   if (descriptor.kind !== requirements.provider || descriptor.model !== requirements.model) reject();
   if (requirements.provider === "codex" && (descriptor.approvalPolicy !== requirements.approvalPolicy
-    || Boolean(descriptor.readOnly) !== requirements.readOnly)) reject();
+    || Boolean(descriptor.readOnly) !== requirements.readOnly
+    || Boolean(descriptor.trustedHostFullAccess) !== (requirements.trustedHostFullAccess === true && !requirements.readOnly))) reject();
   if (requirements.provider === "acpx") {
     const policy = descriptor.providerPolicy as Record<string, unknown> | undefined;
     if (descriptor.agent !== (requirements.settings.acpxAgent ?? "codex")
@@ -295,6 +299,7 @@ export function createRunnerProviderLaunch(
                           codexCommand: effectiveCodexCommand,
                           instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
                           disableProjectInstructions: input.options.disableCodexProjectInstructions,
+                          trustedHostFullAccess: requirements.trustedHostFullAccess === true && !requirements.readOnly,
                           readOnlyRoots: [
                             ...trustedRuntimeReadOnlyRoots(
                               input.options.environment,
@@ -314,6 +319,7 @@ export function createRunnerProviderLaunch(
                   model: requirements.model,
                   approvalPolicy:
                     requirements.approvalPolicy,
+                  ...(provider === "codex" && requirements.trustedHostFullAccess === true && !requirements.readOnly ? { trustedHostFullAccess: true } : {}),
                   externallySandboxed:
                     provider === "codex" &&
                     input.options.externallySandboxed === true,
@@ -391,9 +397,10 @@ export function createRunnerdCodexAppServerArgs(input: {
   readOnlyRoots?: string[];
   instructionWorkingCopyRoot?: string;
   disableProjectInstructions?: boolean;
+  trustedHostFullAccess?: boolean;
 }): string[] {
-  // The filesystem policy denies HOME and CODEX_HOME to keep credentials and
-  // runner state outside provider reach. Always bind those names to the actual
+  // The default filesystem policy denies HOME and CODEX_HOME to keep credentials
+  // and runner state outside provider reach. Bind those names to the actual
   // isolated runner home; a stale controller environment must never cause the
   // execution workspace itself to become an explicit deny root.
   const args = [
@@ -407,6 +414,7 @@ export function createRunnerdCodexAppServerArgs(input: {
       [...(input.readOnlyRoots ?? []), ...codexExecutableReadOnlyRoots(input.environment ?? {}, input.codexCommand)],
       input.instructionWorkingCopyRoot,
       usesPreconfiguredHome(input.environment) && input.runtimeStateRoot ? [input.runtimeStateRoot] : [],
+      input.trustedHostFullAccess === true,
     ),
   ];
   if (usesPreconfiguredHome(input.environment) && input.workingDirectory) {
