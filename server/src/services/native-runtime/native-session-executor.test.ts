@@ -70,6 +70,7 @@ import { DatabaseSync } from "node:sqlite";
 import { nativeSha256 } from "./canonical.js";
 import { resolveRemoteProviderPackAuthority } from "./remote-provider-pack-authority.js";
 import { REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT, RemoteRunnerRecoveryError, readRemoteRunnerRecoveryError } from "./remote-runner-recovery-diagnostics.js";
+import { REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT } from "./remote-runner-process-probe.js";
 import { agentDirectoryWorkingCopyService } from "../agent-directory-working-copies.js";
 import { probeAgentDirectory } from "../agent-directory-probe.js";
 import { AGENT_FILES_CONTRACT } from "../agent-file-store.js";
@@ -872,6 +873,7 @@ describe("remote runner launch fingerprint compatibility", () => {
     const detached = join(root, "detached");
     let launch: { command: string; args?: string[] } | undefined;
     const execute = vi.fn(async (request: { command: string; args?: string[] }) => {
+      if (request.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) return { exitCode: 0, timedOut: false, stdout: "", stderr: "" };
       if (request.args?.[2] === "paperclip-runner-launch") launch = request;
       return { exitCode: 1, timedOut: false, stdout: "", stderr: "" };
     });
@@ -900,7 +902,7 @@ describe("remote runner launch fingerprint compatibility", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it.each([true, false])("launches with the guaranteed Node runtime when boot identity is available: %s", async (hasBootIdentity) => {
+  it.each([true, false])("requires a boot identity before launching the worker (available=%s)", async (hasBootIdentity) => {
     const root = await mkdtemp(join(tmpdir(), "remote-launch-generation-"));
     try {
       // The mocked proc stat is independent of the launch shell's PID.
@@ -914,12 +916,21 @@ describe("remote runner launch fingerprint compatibility", () => {
       const bin = join(root, "bin");
       await mkdir(bin);
       await symlink(process.execPath, join(bin, "node"));
-      for (const name of ["mkdir", "chmod", "date", "mv"]) await symlink(execFileSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim(), join(bin, name));
+      for (const name of ["mkdir", "chmod", "date", "mv", "uname"]) await symlink(execFileSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim(), join(bin, name));
       const marker = join(root, "identity");
-      const result = execFileSync("/bin/sh", ["-c", script, "launch", marker, "nonce", "runner", join(root, "diagnostics"), "/bin/sh", "-c", "printf launched"], { env: { ...process.env, PATH: bin }, encoding: "utf8" });
-      expect(result).toBe("launched");
-      const lines = (await readFile(marker, "utf8")).split("\n");
-      expect(lines[4]).toBe(hasBootIdentity ? "linux:abcd-1234:1234" : "");
+      const result = spawnSync("/bin/sh", ["-c", script, "launch", marker, "nonce", "runner", join(root, "diagnostics"), "/bin/sh", "-c", "printf launched"], { env: { ...process.env, PATH: bin }, encoding: "utf8", timeout: 5_000 });
+      expect(result.error).toBeUndefined();
+      if (hasBootIdentity) {
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("launched");
+        const lines = (await readFile(marker, "utf8")).split("\n");
+        expect(lines[4]).toBe("linux:abcd-1234:1234");
+      } else {
+        expect(result.status).toBe(46);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("runner_process_probe_unavailable");
+        await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      }
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
@@ -1147,6 +1158,7 @@ fs.readFileSync = function(path, ...args) {
     const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     const execute = vi.fn(async (input: { args?: string[] }) => {
       const label = input.args?.[2];
+      if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) return ok;
       if (label === "paperclip-runner-launch") { nonce = input.args![4]!; return ok; }
       if (label === "paperclip-runner-process-identity") return { ...ok, stdout: `${nonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` };
       return { ...ok, exitCode };
@@ -1168,6 +1180,7 @@ fs.readFileSync = function(path, ...args) {
     const result = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     const execute = vi.fn(async (input: { args?: string[] }) => {
       const label = input.args?.[2];
+      if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) return result;
       if (label === "paperclip-runner-launch") { nonce = input.args![4]!; return result; }
       if (label === "paperclip-runner-process-identity") return { ...result, stdout: `${nonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` };
       if (label === "paperclip-runner-monitor") {
@@ -1204,6 +1217,7 @@ fs.readFileSync = function(path, ...args) {
     const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     const execute = vi.fn(async (input: { args?: string[]; timeoutMs?: number }) => {
       const label = input.args?.[2];
+      if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) return ok;
       if (label === "paperclip-runner-launch") { nonce = input.args![4]!; return ok; }
       if (label === "paperclip-runner-process-identity") return { ...ok, stdout: `${nonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` };
       await new Promise(resolve => setTimeout(resolve, input.timeoutMs));
@@ -1237,6 +1251,9 @@ fs.readFileSync = function(path, ...args) {
         bypassSession?: boolean;
       }) => {
         const label = input.args?.[2];
+        if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) {
+          return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+        }
         if (label === "paperclip-runner-launch") {
           launchNonce = input.args?.[4] ?? "";
           return {
@@ -1377,13 +1394,16 @@ fs.readFileSync = function(path, ...args) {
     expect(handle.child.exitCode).toBeNull();
   });
 
-  it.each(["missing marker", "missing fingerprint"])("terminates a detached runner with %s before admitting managed work", async kind => {
+  it.each(["missing marker", "missing fingerprint"])("holds a detached runner with %s when safe cleanup cannot prove ownership", async kind => {
     vi.useFakeTimers();
     try {
       let launchNonce = "";
       const execute = vi.fn(
         async (input: { command?: string; args?: string[] }) => {
           const label = input.args?.[2];
+          if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) {
+            return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+          }
           if (label === "paperclip-runner-launch") {
             launchNonce = input.args?.[4] ?? "";
             return {
@@ -1406,7 +1426,7 @@ fs.readFileSync = function(path, ...args) {
           if (label === "paperclip-runner-identity-failure-cleanup") {
             expect(input.args?.[4]).toBe(launchNonce);
             return {
-              exitCode: 0,
+              exitCode: kind === "missing marker" ? 3 : 4,
               signal: null,
               timedOut: false,
               stdout: "",
@@ -1440,7 +1460,7 @@ fs.readFileSync = function(path, ...args) {
         environment: {},
       });
       const completion = expect(handle.completion).rejects.toThrow(
-        "runner_remote_process_identity_unavailable",
+        "runner_remote_process_identity_unavailable_cleanup_failed",
       );
       await vi.advanceTimersByTimeAsync(20_100);
       await completion;
@@ -1457,10 +1477,14 @@ fs.readFileSync = function(path, ...args) {
       expect(cleanup?.args?.[1]).toContain('grep -Fqx -- "--runner-id"');
       expect(cleanup?.args?.[1]).toContain('kill -TERM -- "$signal_target"');
       expect(cleanup?.args?.[1]).toContain('kill -KILL -- "$signal_target"');
+      expect(cleanup?.args?.[1]).toContain('test -n "$fingerprint"');
+      expect(cleanup?.args?.[1]).toContain('marker_matches || exit 4');
       expect(cleanup?.args?.[1]?.indexOf("rm -f --")).toBeGreaterThan(
-        cleanup?.args?.[1]?.indexOf('kill -0 "$pid" 2>/dev/null && exit 5') ??
+        cleanup?.args?.[1]?.indexOf('test "$probe_code" = 45 || exit 5') ??
           Number.MAX_SAFE_INTEGER,
       );
+      expect(handle.isExitConfirmed?.()).toBe(false);
+      expect(handle.child.pid).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
@@ -1472,6 +1496,9 @@ fs.readFileSync = function(path, ...args) {
       const execute = vi.fn(
         async (input: { command?: string; args?: string[] }) => {
           const label = input.args?.[2];
+          if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) {
+            return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+          }
           return {
             exitCode:
               label === "paperclip-runner-launch"

@@ -120,7 +120,7 @@ export interface NativeAcpxProfileSnapshot {
 }
 
 export type NativeProviderConfig =
-  | { kind: "codex"; model: string | null; approvalPolicy?: NativeCodexApprovalPolicy }
+  | { kind: "codex"; model: string | null; approvalPolicy?: NativeCodexApprovalPolicy; sandboxMode?: "danger-full-access"; remoteCodexHome?: string }
   | { kind: "opencode"; model: string; permissionMode?: NativeOpenCodePermissionMode }
   | {
       kind: "claude_managed";
@@ -152,7 +152,7 @@ export type NativeProviderConfig =
     };
 
 export type NativeProviderConfigV4 =
-  | { kind: "codex"; model: string | null; approvalPolicy: NativeCodexApprovalPolicy }
+  | { kind: "codex"; model: string | null; approvalPolicy: NativeCodexApprovalPolicy; sandboxMode?: "danger-full-access"; remoteCodexHome?: string }
   | { kind: "opencode"; model: string; permissionMode: NativeOpenCodePermissionMode }
   | Extract<NativeProviderConfig, { kind: "claude_managed" | "aws_agentcore" }>
   | {
@@ -586,7 +586,7 @@ export function parseNativeExecutionInput(value: unknown): NativeExecutionInput 
       : provider.kind === "acpx"
         ? ["kind", "agent", "model", isV4 ? "permissionMode" : "permissionPolicy", "profile", "piThinkingLevel", ...(isV4 ? ["mode"] : []), ...(isV9 ? ["claudeEffort"] : []), ...(isV10 ? ["grokEffort", "grokDisableWebSearch"] : [])]
       : provider.kind === "codex" && isV4
-        ? ["kind", "model", "approvalPolicy", ...(isV5 ? ["reasoningEffort", "webSearch"] : [])]
+        ? ["kind", "model", "approvalPolicy", ...(isV5 ? ["reasoningEffort", "webSearch"] : []), ...(isV7 ? ["sandboxMode", "remoteCodexHome"] : [])]
         : provider.kind === "opencode" && isV4
           ? ["kind", "model", "permissionMode"]
           : ["kind", "model"],
@@ -802,8 +802,13 @@ export function parseNativeExecutionInput(value: unknown): NativeExecutionInput 
     if (isV5 && provider.webSearch !== undefined && provider.webSearch !== "disabled") {
       throw new NativeExecutionInputError("input.provider.webSearch must be disabled when specified");
     }
+    if (provider.sandboxMode !== undefined && provider.sandboxMode !== "danger-full-access") throw new NativeExecutionInputError("input.provider.sandboxMode is unsupported");
+    if ((provider.sandboxMode !== undefined || provider.remoteCodexHome !== undefined) && input.homeMode !== "preconfigured") throw new NativeExecutionInputError("trusted host selection requires preconfigured homeMode");
+    if (provider.remoteCodexHome !== undefined && (typeof provider.remoteCodexHome !== "string" || !provider.remoteCodexHome.startsWith("/") || provider.remoteCodexHome === "/" || /[\0\r\n]/.test(provider.remoteCodexHome) || provider.remoteCodexHome.split("/").some(part => part === "." || part === ".."))) throw new NativeExecutionInputError("input.provider.remoteCodexHome must be an absolute canonical directory");
     parsedProvider = {
       kind: "codex",
+      ...(provider.sandboxMode !== undefined ? { sandboxMode: "danger-full-access" as const } : {}),
+      ...(provider.remoteCodexHome !== undefined ? { remoteCodexHome: provider.remoteCodexHome as string } : {}),
       model: providerModel,
       ...(isV4
         ? { approvalPolicy: provider.approvalPolicy as NativeCodexApprovalPolicy }

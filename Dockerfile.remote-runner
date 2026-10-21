@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1.20
+# Build the normal Dockerfile at a reviewed commit first. Supply a named
+# darwin-runner build context containing the same source's macOS arm64 daemon.
+ARG PAPERCLIP_CORE_IMAGE
+FROM ${PAPERCLIP_CORE_IMAGE}
+ARG DARWIN_RUNNER_SHA256
+COPY --from=darwin-runner --chmod=755 /paperclip-runnerd /app/packages/paperclip-runner/dist/bin/darwin-arm64/paperclip-runnerd
+COPY --from=darwin-runner --chmod=755 /paperclip-runnerd /app/server/dist/vendor/paperclip-runner/bin/darwin-arm64/paperclip-runnerd
+RUN test -n "$DARWIN_RUNNER_SHA256" \
+  && printf '%s  %s\n' "$DARWIN_RUNNER_SHA256" /app/packages/paperclip-runner/dist/bin/darwin-arm64/paperclip-runnerd | sha256sum -c - \
+  && printf '%s  %s\n' "$DARWIN_RUNNER_SHA256" /app/server/dist/vendor/paperclip-runner/bin/darwin-arm64/paperclip-runnerd | sha256sum -c - \
+  && node --input-type=module -e 'import {readFileSync} from "node:fs"; const b=readFileSync("/app/packages/paperclip-runner/dist/bin/darwin-arm64/paperclip-runnerd"); if(b.readUInt32LE(0)!==0xfeedfacf || b.readUInt32LE(4)!==0x0100000c) throw Error("expected Darwin arm64 daemon");'

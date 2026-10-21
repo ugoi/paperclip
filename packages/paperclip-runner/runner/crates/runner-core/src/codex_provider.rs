@@ -422,6 +422,9 @@ pub struct CodexProviderConfig {
     pub approval_policy: String,
     #[serde(default)]
     pub externally_sandboxed: bool,
+    /// Explicit controller-selected trusted SSH host access, separate from sandbox delegation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trusted_host_full_access: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
     // Older persisted configurations deliberately retain the provider default.
@@ -505,6 +508,11 @@ impl CodexProviderConfig {
             return Err(LocalRunnerError::invalid(format!(
                 "OpenCode providerVersion must equal the qualified {QUALIFIED_OPENCODE_VERSION} release",
             )));
+        }
+        if self.trusted_host_full_access
+            && (self.provider != "codex" || self.externally_sandboxed || self.read_only)
+        {
+            return Err(LocalRunnerError::invalid("trusted host access requires default-mode Codex without external sandbox delegation"));
         }
         if self.externally_sandboxed && self.provider != "codex" {
             return Err(LocalRunnerError::invalid(
@@ -894,6 +902,16 @@ const CODEX_PROVIDER_ENVIRONMENT_KEYS: &[&str] = &[
     "PAPERCLIP_RUNNER_EXTERNAL_SANDBOX",
 ];
 
+fn codex_turn_sandbox_policy(profile: &str) -> Option<Value> {
+    match profile {
+        "paperclip-runner-trusted-host" => Some(json!({"type": "dangerFullAccess"})),
+        "paperclip-runner-external-sandbox" => {
+            Some(json!({"type": "externalSandbox", "networkAccess": "enabled"}))
+        }
+        _ => None,
+    }
+}
+
 fn codex_permission_profile(provider: &str, external_sandbox: bool) -> &'static str {
     if provider == "codex" && external_sandbox {
         "paperclip-runner-external-sandbox"
@@ -984,11 +1002,20 @@ impl CodexProvider {
         let permission_profile = if config.read_only {
             "paperclip-runner-workspace-read-only"
         } else {
-            codex_permission_profile(
-                &config.provider,
-                config.externally_sandboxed
-                    || std::env::var("PAPERCLIP_RUNNER_EXTERNAL_SANDBOX").as_deref() == Ok("1"),
-            )
+            if config.trusted_host_full_access {
+                if std::env::var("PAPERCLIP_RUNNER_HOME_MODE").as_deref() != Ok("preconfigured") {
+                    return Err(LocalRunnerError::invalid(
+                        "trusted_host_requires_preconfigured_home",
+                    ));
+                }
+                "paperclip-runner-trusted-host"
+            } else {
+                codex_permission_profile(
+                    &config.provider,
+                    config.externally_sandboxed
+                        || std::env::var("PAPERCLIP_RUNNER_EXTERNAL_SANDBOX").as_deref() == Ok("1"),
+                )
+            }
         };
         let (dynamic_tools, authorized_tool_ids) =
             codex_dynamic_tools(authorized_tools.iter().cloned())?;
@@ -1190,10 +1217,13 @@ impl CodexProvider {
                 "baseInstructions"
             };
             params_object.insert(instruction_field.to_owned(), json!(config.instructions));
-            if provider.permission_profile == "paperclip-runner-external-sandbox" {
-                // The execution target (for example Daytona) is the OS sandbox.
-                // Codex must not try to create nested user/network namespaces,
-                // which correctly fail inside an unprivileged container.
+            if matches!(
+                provider.permission_profile,
+                "paperclip-runner-external-sandbox" | "paperclip-runner-trusted-host"
+            ) {
+                // A sandbox target supplies isolation; a trusted host explicitly
+                // authorizes unrestricted execution. Both disable nested Codex
+                // isolation, while retaining distinct controller authority.
                 params_object.insert("sandbox".to_owned(), json!("danger-full-access"));
             } else {
                 params_object.insert("permissions".to_owned(), json!(provider.permission_profile));
@@ -1938,11 +1968,8 @@ impl CodexProvider {
         if let Some(mode) = reasoning_mode {
             turn_params_object.insert("reasoningMode".to_owned(), json!(mode));
         }
-        if self.permission_profile == "paperclip-runner-external-sandbox" {
-            turn_params_object.insert(
-                "sandboxPolicy".to_owned(),
-                json!({"type": "externalSandbox", "networkAccess": "enabled"}),
-            );
+        if let Some(policy) = codex_turn_sandbox_policy(self.permission_profile) {
+            turn_params_object.insert("sandboxPolicy".to_owned(), policy);
         } else {
             turn_params_object.insert("permissions".to_owned(), json!(self.permission_profile));
         }
@@ -4390,6 +4417,7 @@ done
             instructions: "Test only.".to_owned(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            trusted_host_full_access: false,
             read_only: false,
             include_skill_instructions: None,
             conversation_mode: None,
@@ -4827,6 +4855,7 @@ done
             instructions: String::new(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            trusted_host_full_access: false,
             read_only: false,
             include_skill_instructions: None,
             conversation_mode: None,
@@ -4949,6 +4978,7 @@ done
             instructions: String::new(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            trusted_host_full_access: false,
             read_only: false,
             include_skill_instructions: None,
             conversation_mode: None,
@@ -5009,6 +5039,53 @@ done
         }
         assert!(!GITHUB_CREDENTIAL_ENVIRONMENT_KEYS.contains(&"GIT_CONFIG_KEY_32"));
         assert!(!GITHUB_CREDENTIAL_ENVIRONMENT_KEYS.contains(&"GIT_CONFIG_VALUE_32"));
+    }
+
+    #[test]
+    fn trusted_host_turn_policy_is_not_external_sandbox_delegation() {
+        assert_eq!(
+            codex_turn_sandbox_policy("paperclip-runner-trusted-host"),
+            Some(json!({"type": "dangerFullAccess"}))
+        );
+        assert_eq!(
+            codex_turn_sandbox_policy("paperclip-runner-external-sandbox"),
+            Some(json!({"type": "externalSandbox", "networkAccess": "enabled"}))
+        );
+        assert_eq!(
+            codex_turn_sandbox_policy("paperclip-runner-workspace-read-only"),
+            None
+        );
+    }
+
+    #[test]
+    fn trusted_host_selection_roundtrips_and_rejects_conflicting_policies() {
+        let mut config: CodexProviderConfig = serde_json::from_value(json!({
+            "provider": "codex", "driver": "codex_app_server", "providerVersion": "fixture",
+            "command": "/bin/sh", "cwd": std::env::current_dir().unwrap(),
+            "trustedHostFullAccess": true
+        }))
+        .unwrap();
+        assert!(config.validate().is_ok());
+        assert!(config.trusted_host_full_access);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["trustedHostFullAccess"],
+            true
+        );
+        config.externally_sandboxed = true;
+        assert!(config.validate().is_err());
+        config.externally_sandboxed = false;
+        config.read_only = true;
+        assert!(config.validate().is_err());
+        let old: CodexProviderConfig = serde_json::from_value(json!({
+            "provider": "codex", "driver": "codex_app_server", "providerVersion": "fixture",
+            "command": "/bin/sh", "cwd": std::env::current_dir().unwrap()
+        }))
+        .unwrap();
+        assert!(!old.trusted_host_full_access);
+        assert!(serde_json::to_value(old)
+            .unwrap()
+            .get("trustedHostFullAccess")
+            .is_none());
     }
 
     #[test]

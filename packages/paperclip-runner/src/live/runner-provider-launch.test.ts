@@ -172,3 +172,20 @@ describe("built-in provider launch preparation", () => {
     }
   });
 });
+
+
+describe("trusted host launch authority", () => {
+  it("binds opt-in to the requirements digest and refuses forged capability", () => {
+    const ordinary = runnerProviderLaunchRequirements({}, requirements.identity, {}, null, "task");
+    const selected = runnerProviderLaunchRequirements({ trustedHostFullAccess: true }, requirements.identity, {}, null, "task");
+    expect(runnerLaunchRequirementsDigest(ordinary)).not.toBe(runnerLaunchRequirementsDigest(selected));
+    const launch = createRunnerProviderLaunch(selected, environment);
+    expect(launch.trustedHostFullAccess).toBe(true);
+    expect(() => validatePreparedRunnerLaunch(ordinary, { configurationId: "test", requirementsDigest: runnerLaunchRequirementsDigest(ordinary), provider: { ...createRunnerProviderLaunch(ordinary, environment), trustedHostFullAccess: true } })).toThrow("mismatch");
+  });
+  it("does not grant full-host execution to planning or non-Codex providers", () => {
+    const selected = runnerProviderLaunchRequirements({ trustedHostFullAccess: true }, requirements.identity, { permissions: "paperclip-runner-workspace-read-only" }, null, "task");
+    expect(createRunnerProviderLaunch(selected, environment).trustedHostFullAccess).not.toBe(true);
+    expect(() => runnerProviderLaunchRequirements({ provider: "opencode", trustedHostFullAccess: true }, requirements.identity, {}, null, "task")).toThrow("trusted_host_requires_codex");
+  });
+});

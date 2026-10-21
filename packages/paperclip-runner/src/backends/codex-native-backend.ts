@@ -155,6 +155,7 @@ function createTransportBackedNativeSessionBackend(
   const transportFactory = options.transportFactory;
   return new HarnessDriverBackend(
     new CodexAppServerDriver({
+      trustedHostFullAccess: isCodex && input.provider.kind === "codex" && input.provider.sandboxMode === "danger-full-access",
       ...(input.provider.model ? { model: input.provider.model } : {}),
       ...(input.provider.kind === "codex" && "webSearch" in input.provider && input.provider.webSearch === "disabled"
         ? { disableWebSearch: true } : {}),

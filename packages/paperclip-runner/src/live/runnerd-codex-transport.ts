@@ -1347,6 +1347,8 @@ export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionD
    * runtimes such as Daytona intentionally omit nested namespace privileges.
    */
   externallySandboxed?: boolean;
+  /** Explicit manager grant; distinct from sandbox transport and never read from ambient env. */
+  trustedHostFullAccess?: boolean;
   /** Current run's authority catalog, used when a suspended session is rebound. */
   resumeDynamicTools?: readonly Readonly<Record<string, unknown>>[];
   /** Current run's completion authority, rebound without changing provider identity. */
@@ -4998,6 +5000,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       config: { include_collaboration_mode_instructions: prior.includeCollaborationModeInstructions !== false },
     }, runtimeContext, instructions);
     if (requirements.schema !== "paperclip.runner.launch-requirements.v1"
+      || Boolean(requirements.trustedHostFullAccess) !== (this.options.trustedHostFullAccess === true)
       || commandDigest(requirements.identity) !== commandDigest(identity)) {
       throw new Error("runner_launch_recovery_requirements_unavailable");
     }
@@ -5710,6 +5713,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     // Adoption authenticates the original artifact and process. Launch profiles
     // belong only to a new spawn and may reference a retired controller build.
     const preparesProviderLaunch = !this.options.prepareLaunch && !this.options.adoptExistingRunner;
+    if (!this.options.prepareLaunch && provider === "codex") {
+      const priorProvider = record(record(controlPlaneState!.runAttachTemplate).provider);
+      if (Boolean(priorProvider.trustedHostFullAccess) !== (this.options.trustedHostFullAccess === true && priorProvider.readOnly !== true)) {
+        throw new Error("runner_trusted_host_access_binding_changed");
+      }
+    }
     if (!this.options.prepareLaunch && provider === "codex" && (this.options.homeMode === "preconfigured" || record(record(controlPlaneState!.runAttachTemplate).provider).preconfiguredHome !== undefined)) {
       const seed = rotatedRunAttachPayload(controlPlaneState!, desiredIdentity, this.#authorizedTools, this.options.resumeCompletionContract);
       const priorHome = record(seed.provider).preconfiguredHome;
@@ -5882,6 +5891,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             codexCommand: typeof recordedCommand === "string" ? recordedCommand : this.options.codexCommand,
             instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
             disableProjectInstructions: this.options.disableCodexProjectInstructions,
+            trustedHostFullAccess: this.options.trustedHostFullAccess === true && record(runAttachTemplate.provider).readOnly !== true,
             readOnlyRoots: [
               ...trustedRuntimeReadOnlyRoots(this.options.environment),
               ...(runtimeContext
