@@ -1,0 +1,65 @@
+name: Publish verified hosted native candidate
+on:
+  push:
+    branches: [ops/publish-hosted-5520764]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  packages: write
+jobs:
+  publish:
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 5520764c9e15881c0b18d7eadbd4dfb7a302e742
+      - name: Verify exact-source Darwin artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/darwin-runner"
+          gh api repos/ugoi/paperclip/actions/artifacts/12357665342/zip > "$RUNNER_TEMP/darwin-runner.zip"
+          echo "ad7ae837c35dc838d265269b9b420c0aa99f9de59150aa7cd036ff25ccc283b0  $RUNNER_TEMP/darwin-runner.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/darwin-runner.zip" -d "$RUNNER_TEMP/darwin-runner"
+          cd "$RUNNER_TEMP/darwin-runner"
+          test "$(cat SOURCE_REVISION)" = 5520764c9e15881c0b18d7eadbd4dfb7a302e742
+          sha256sum -c SHA256SUMS
+          echo 'ad4d433ddefcacd7f5e9a903c31c52baa4ebc2b42f2a0423f3aca39b6fea1b8b  paperclip-runnerd' | sha256sum -c -
+          jq -e '.schema == "paperclip-runner/runnerd-build-metadata/v1" and .binaryName == "paperclip-runnerd" and .nativeExecutionVersion == 1' build-metadata.json
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Resolve exact-source Core to its immutable digest
+        id: core
+        run: |
+          set -euo pipefail
+          echo 'image=ghcr.io/ugoi/paperclip@sha256:3f413c30b00392f2a2d63f893d524d2dadd1cbe2cfdcd6567b5a573864f75001' >> "$GITHUB_OUTPUT"
+          # The inherited runtime stamp must agree with the artifact source.
+          printf '\nRUN test "$PAPERCLIP_BUILD_COMMIT" = "5520764c9e15881c0b18d7eadbd4dfb7a302e742"\n' >> Dockerfile.remote-runner
+      - name: Publish verified combined candidate
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.remote-runner
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/ugoi/paperclip:stefan-5520764c9e15881c0b18d7eadbd4dfb7a302e742
+          build-contexts: |
+            darwin-runner=${{ runner.temp }}/darwin-runner
+          build-args: |
+            PAPERCLIP_CORE_IMAGE=${{ steps.core.outputs.image }}
+            DARWIN_RUNNER_SHA256=ad4d433ddefcacd7f5e9a903c31c52baa4ebc2b42f2a0423f3aca39b6fea1b8b
+      - name: Record provenance
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CORE_IMAGE: ${{ steps.core.outputs.image }}
+        run: |
+          printf 'Source: `5520764c9e15881c0b18d7eadbd4dfb7a302e742`\n\nCore: `%s`\n\nCombined image: `ghcr.io/ugoi/paperclip@%s`\n\nDarwin was built and tested in successful hosted job119306443181 of run39624564204. Immutable artifact12357665342, archive and binary checksums are verified. Core was already published; its exact digest and runtime source stamp are checked. This packaging job does not deploy.\n' "$CORE_IMAGE" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
