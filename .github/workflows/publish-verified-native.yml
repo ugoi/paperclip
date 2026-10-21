@@ -1,0 +1,75 @@
+name: Publish verified native candidate
+on:
+  push:
+    branches: [ops/publish-native-13ec080]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  publish:
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 13ec080e76978fd8e8b3cbc60dee6525e3244b85
+      - name: Verify exact-source Darwin artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/darwin-runner"
+          gh release download stefan-native-13ec080 --repo ugoi/paperclip --pattern darwin-runner-13ec080.tar.gz --dir "$RUNNER_TEMP"
+          echo "a324a6c35ec2c474351d554febef6b98a51a066cfd9538304ac6022000993b46  $RUNNER_TEMP/darwin-runner-13ec080.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/darwin-runner-13ec080.tar.gz" -C "$RUNNER_TEMP/darwin-runner"
+          cd "$RUNNER_TEMP/darwin-runner"
+          test "$(cat SOURCE_REVISION)" = 13ec080e76978fd8e8b3cbc60dee6525e3244b85
+          sha256sum -c SHA256SUMS
+          echo 'd6b65f7d867aaf48cb58446c263d95ac1c6e47343179a248298198cae3eb4ccd  paperclip-runnerd' | sha256sum -c -
+          jq -e '.commit == "13ec080e76978fd8e8b3cbc60dee6525e3244b85" and .runnerCoreRecompiled and .testsPassed and .sourceManifestMatchesCapture and .sourceUnchangedDuringBuild and .sourceFilesVerified == 1313' VERIFICATION.json
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Resolve exact-source Core to its immutable digest
+        id: core
+        run: |
+          set -euo pipefail
+          ready=false
+          for attempt in $(seq 1 120); do
+            if docker buildx imagetools inspect ghcr.io/ugoi/paperclip:core-13ec080e76978fd8e8b3cbc60dee6525e3244b85 --format '{{json .Manifest}}' > "$RUNNER_TEMP/core-manifest.json"; then
+              ready=true
+              break
+            fi
+            sleep 10
+          done
+          test "$ready" = true
+          digest=$(jq -r '.digest' "$RUNNER_TEMP/core-manifest.json")
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "image=ghcr.io/ugoi/paperclip@$digest" >> "$GITHUB_OUTPUT"
+          # The inherited runtime stamp must agree with the artifact source.
+          printf '\nRUN test "$PAPERCLIP_BUILD_COMMIT" = "13ec080e76978fd8e8b3cbc60dee6525e3244b85"\n' >> Dockerfile.remote-runner
+      - name: Publish verified combined candidate
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.remote-runner
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/ugoi/paperclip:stefan-13ec080e76978fd8e8b3cbc60dee6525e3244b85
+          build-contexts: |
+            darwin-runner=${{ runner.temp }}/darwin-runner
+          build-args: |
+            PAPERCLIP_CORE_IMAGE=${{ steps.core.outputs.image }}
+            DARWIN_RUNNER_SHA256=d6b65f7d867aaf48cb58446c263d95ac1c6e47343179a248298198cae3eb4ccd
+      - name: Record provenance
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CORE_IMAGE: ${{ steps.core.outputs.image }}
+        run: |
+          printf 'Source: `13ec080e76978fd8e8b3cbc60dee6525e3244b85`\n\nCore: `%s`\n\nCombined image: `ghcr.io/ugoi/paperclip@%s`\n\nDarwin was built and tested from exact source on the existing Mac after hosted ARM capacity failure. Archive and binary checksums were verified independently. This job does not deploy.\n' "$CORE_IMAGE" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
