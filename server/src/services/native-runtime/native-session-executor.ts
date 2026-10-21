@@ -11119,6 +11119,21 @@ export function createRemoteRunnerProcessLauncher(input: {
   const runner = input.runner;
   return (spec) => {
     let exitConfirmed = false;
+    let launchDispatched = false;
+    let launchCancelled = false;
+    let launchReadySettled = false;
+    let resolveLaunchReady!: () => void;
+    let rejectLaunchReady!: (error: unknown) => void;
+    const launchReady = new Promise<void>((resolve, reject) => {
+      resolveLaunchReady = resolve;
+      rejectLaunchReady = reject;
+    });
+    // A caller can close before it starts awaiting readiness. Completion still
+    // owns draining the in-flight preparation and any dispatched process.
+    void launchReady.catch(() => undefined);
+    const assertLaunchActive = () => {
+      if (launchCancelled) throw new Error("runner_process_launch_cancelled");
+    };
     let launchedIdentity: {
       nonce: string;
       pid: number;
@@ -11172,6 +11187,7 @@ export function createRemoteRunnerProcessLauncher(input: {
       },
     };
     const completion = (async () => {
+      assertLaunchActive();
       if (input.ensureArtifact) {
         if (input.trace) {
           await input.trace.measure(
@@ -11183,6 +11199,7 @@ export function createRemoteRunnerProcessLauncher(input: {
           await input.ensureArtifact();
         }
       }
+      assertLaunchActive();
       // Supervision runs in the SSH account environment, while the child also
       // receives provider configuration. Both must support the same proof.
       for (const env of [undefined, processEnvironment(spec.environment)]) {
@@ -11191,6 +11208,7 @@ export function createRemoteRunnerProcessLauncher(input: {
           cwd: input.target.remoteCwd, env,
           bypassSession: true, timeoutMs: 10_000,
         });
+        assertLaunchActive();
         if (prerequisite.exitCode !== 0 || prerequisite.timedOut) {
           throw new Error("runner_process_probe_unavailable");
         }
@@ -11225,6 +11243,8 @@ export function createRemoteRunnerProcessLauncher(input: {
       // into its own session instead; its own bounded diagnostics directory and
       // durable PRP state remain the authorities, and the controller monitors
       // the exact persisted process identity below.
+      assertLaunchActive();
+      launchDispatched = true;
       const launchResult = await runner.execute({
         command: "sh",
         args: [
@@ -11297,6 +11317,15 @@ export function createRemoteRunnerProcessLauncher(input: {
         endedAtMs: Date.now(),
         attributes: { identitySource: "remote_marker", detached: true },
       });
+      launchReadySettled = true;
+      if (launchCancelled) {
+        // Cancellation crossed detached dispatch. Keep the exact marker and
+        // monitor until this generation is proved stopped; never orphan it.
+        child.kill("SIGKILL");
+        rejectLaunchReady(new Error("runner_process_launch_cancelled"));
+      } else {
+        resolveLaunchReady();
+      }
 
       while (true) {
         const observed = await readRemoteRunnerRecoveryProbe({
@@ -11380,8 +11409,26 @@ export function createRemoteRunnerProcessLauncher(input: {
           stderr: diagnosticTail || stateSummary,
         };
       }
-    })();
-    return { child, completion, isExitConfirmed: () => exitConfirmed };
+    })().catch((error: unknown) => {
+      // No exec was dispatched, and the awaited preparation has now drained.
+      if (!launchDispatched) exitConfirmed = true;
+      launchReadySettled = true;
+      rejectLaunchReady(error);
+      if (launchCancelled && !launchDispatched) {
+        return { code: 0, signal: null, stdout: "", stderr: "runner_process_launch_cancelled" };
+      }
+      throw error;
+    });
+    return {
+      child, completion, launchReady,
+      cancelPendingLaunch: () => {
+        if (launchReadySettled) return;
+        launchCancelled = true;
+        rejectLaunchReady(new Error("runner_process_launch_cancelled"));
+        if (launchedIdentity) child.kill("SIGKILL");
+      },
+      isExitConfirmed: () => exitConfirmed,
+    };
   };
 }
 

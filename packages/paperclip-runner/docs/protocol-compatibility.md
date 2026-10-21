@@ -345,3 +345,16 @@ Codex-only. Deterministic source-identity and compatibility checks do not claim
 fresh live Copilot qualification; no live Copilot provider call was performed
 for this fork update. Both runner binaries must be rebuilt because the generated
 Rust admission table contains the updated source digest.
+
+## Fork remote launch readiness
+
+Remote artifact staging and process-identity probes finish before the bounded
+PRP admission budget starts. Preparation retains a separate bootstrap-lifetime
+bound, and cancellation drains preparation or confirms the exact dispatched
+process has exited before releasing ownership. Local launch handles are unchanged.
+
+This shared transport source change advances Copilot's source attestation from
+53 to 54. The immutable v53 fixture remains decodable; current launch admission
+requires the regenerated digest. Executable closures and qualification status
+remain unchanged. No new live Copilot qualification is claimed. Linux and Darwin
+runner binaries must be rebuilt with the matching generated Rust admission table.
