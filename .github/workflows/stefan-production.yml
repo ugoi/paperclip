@@ -38,6 +38,8 @@ jobs:
         with:
           context: .
           target: production
+          cache-from: type=gha,scope=stefan-production-core
+          cache-to: type=gha,mode=max,scope=stefan-production-core
           platforms: linux/amd64
           push: true
           tags: ghcr.io/ugoi/paperclip:core-${{ github.sha }}
@@ -56,6 +58,16 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
+      - name: Restore Darwin compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/paperclip-runner/runner/target
+          key: stefan-darwin-${{ hashFiles('packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            stefan-darwin-${{ hashFiles('packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/rust-toolchain.toml') }}-
       - name: Build and test the same revision for macOS arm64
         working-directory: packages/paperclip-runner
         env:

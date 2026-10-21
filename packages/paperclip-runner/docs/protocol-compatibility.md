@@ -331,3 +331,17 @@ No server-wide tool preloading, model change or permission change is introduced.
 The shared bridge's source binding advances pending Copilot profile 22 to 23.
 Profile 22 remains decodable and its fixture is immutable. Copilot remains pending;
 the revision does not qualify a new provider or change its executable closure.
+
+## Fork trusted Codex host configuration
+
+The explicit trusted-host Codex setting changes shared execution, backend,
+provider-launch and transport sources. Copilot's source attestation therefore
+advances from profile 52 to 53. Profile 52's fixture is preserved and remains
+decodable for recovery; exact launch admission uses the new digest.
+
+This follows the upstream 51-to-52 source-identity update: Copilot's executable
+closure and existing qualification field remain unchanged. The new setting is
+Codex-only. Deterministic source-identity and compatibility checks do not claim
+fresh live Copilot qualification; no live Copilot provider call was performed
+for this fork update. Both runner binaries must be rebuilt because the generated
+Rust admission table contains the updated source digest.
