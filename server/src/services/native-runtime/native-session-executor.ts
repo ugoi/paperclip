@@ -165,7 +165,7 @@ import { verifyRetainedMaintenanceNoLaunch } from "./native-maintenance-no-launc
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { reportRunFailure } from "../run-failure-report.js";
 import {
-  REMOTE_RECOVERY_MARKER_READ_SCRIPT, REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT,
+  REMOTE_RECOVERY_MARKER_READ_SCRIPT, REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT, REMOTE_RECOVERY_PROCESS_FINGERPRINT_CHECK_SCRIPT,
   RemoteRunnerRecoveryError, attachRemoteRunnerRecoveryDiagnostic, readRemoteRunnerRecoveryError, remoteRecoveryProbeReason,
 } from "./remote-runner-recovery-diagnostics.js";
 import { readRemoteRunnerRecoveryProbe, REMOTE_RUNNER_RECOVERY_PROBE_BUDGET_MS } from "./remote-runner-recovery-probe.js";
@@ -11018,7 +11018,7 @@ export async function verifyRemoteRunnerReattachment(input: {
         command: "sh",
         args: [
           "-c",
-          `${REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT}; if ${REMOTE_RUNNER_PROCESS_FINGERPRINT_SCRIPT}; then :; else exit 46; fi; test "$process_fingerprint" = "$5" || exit 47` +
+          `${REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT}; ${REMOTE_RECOVERY_PROCESS_FINGERPRINT_CHECK_SCRIPT}` +
             (signal ? '; kill -"$6" "$pid"' : ""),
           "paperclip-runner-recovery-check",
           identityPath,
@@ -11298,7 +11298,7 @@ export function createRemoteRunnerProcessLauncher(input: {
             args: [
               "-c",
               REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT + (identity.processStartFingerprint
-                ? `; if ${REMOTE_RUNNER_PROCESS_FINGERPRINT_SCRIPT}; then :; else exit 46; fi; test "$process_fingerprint" = "$5" || exit 47`
+                ? `; ${REMOTE_RECOVERY_PROCESS_FINGERPRINT_CHECK_SCRIPT}`
                 : ""),
               "paperclip-runner-monitor",
               input.processIdentityPath,
