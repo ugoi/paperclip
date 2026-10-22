@@ -3140,3 +3140,19 @@ ownership holds still need separate recovery with explicit exit evidence. This
 change does not release them automatically. The adopted-runner `isAlive()`
 boolean contract is unchanged; this patch does not add unknown-state propagation
 to its callers.
+
+
+### Native Codex checks with preconfigured SSH homes
+
+For an SSH environment with `homeMode: "preconfigured"`, the native connection
+check uses the remote operating-system account home, just like a task. An
+explicit `remoteCodexHome` must pass the same remote ownership and path checks.
+Controller `HOME`, `CODEX_HOME` and XDG paths do not select the remote account.
+The check leaves the login on the worker; it does not upload a controller login
+or copy a refreshed worker credential back to the controller. A selected managed
+AI credential home retains its existing isolated check path.
+
+The hello turn still uses the read-only permission profile with no dynamic
+tools. Model identity, actual provider response and confirmed cleanup remain
+required for success. Failure to resolve the remote account home fails the check
+before staging an artifact or starting a provider.

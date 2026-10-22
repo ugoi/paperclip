@@ -3552,6 +3552,30 @@ it.each(["settled", "late", "late-release-error"] as const)("retires owned start
   }
 });
 
+it("preserves the remote preconfigured account through setup probe launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runnerd-preconfigured-probe-"));
+  const launch = vi.fn((_spec: durableControlPlane.RunnerProcessLaunchSpec) => { throw new Error("fixture launch boundary"); });
+  try {
+    await expect(probeNativeRunnerEnvironment({
+      runtimeDirectory: root, provider: "codex", model: "gpt-test", timeoutMs: 1_000,
+      environment: { HOME: "/remote/account", CODEX_HOME: "/remote/account/.codex", PATH: process.env.PATH },
+      workingDirectory: "/remote/probe/workspace",
+      transportOptions: {
+        homeMode: "preconfigured", runnerFilesystemRoot: "/remote/probe",
+        sourceCodexHome: "", runnerBinary: resolve(import.meta.dirname, "../../package.json"),
+        codexCommand: "/remote/bin/codex", runnerProcessLauncher: launch,
+        controlPlaneRegistration: async () => ({ connectUrl: "ws://127.0.0.1:1", release: async () => {} }),
+      },
+    })).rejects.toThrow("fixture launch boundary");
+    expect(launch).toHaveBeenCalledOnce();
+    const environment = launch.mock.calls[0]![0].environment;
+    expect(environment.HOME).toBe("/remote/account");
+    expect(environment.CODEX_HOME).toBe("/remote/account/.codex");
+    expect(environment.PAPERCLIP_RUNNER_HOME_MODE).toBe("preconfigured");
+    await expect(stat(join(root, "codex-home"))).rejects.toMatchObject({ code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 it("does not certify probe cleanup while owned credential preparation is unconfirmed", async () => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-probe-owned-preparation-"));
   const artifact = join(root, "unexecuted-artifact");

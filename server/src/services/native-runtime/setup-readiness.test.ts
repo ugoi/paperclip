@@ -150,6 +150,41 @@ describe("Codex selected native account verification", () => {
   const sshContext = { companyId: "company", adapterType: "paperclip_runner", config: {}, executionTarget: {
     kind: "remote" as const, transport: "ssh" as const, remoteCwd: "/qa-workspace", spec: { host: "qa-host", username: "qa-user", port: 22, remoteCwd: "/qa-workspace", remoteWorkspacePath: "/qa-workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true },
   } };
+  it.each([undefined, "/remote/codex-account"])("tests a preconfigured SSH home without staging the controller login (%s)", async remoteCodexHome => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), "native-preconfigured-probe-")));
+    try {
+      // A controller login must not affect a worker-owned account, even when
+      // that controller credential would be rejected by the isolated probe.
+      await symlink(join(home, "missing-controller-login"), join(home, "auth.json"));
+      sshExecute.mockImplementation(async command => ({ exitCode: 0, timedOut: false,
+        stdout: command.args?.[2] === "paperclip-codex-home" ? `${remoteCodexHome}\n` : "/remote/user\n", stderr: "" }));
+      nativeProbe.mockImplementation(async input => {
+        expect(input.transportOptions.homeMode).toBe("preconfigured");
+        expect(input.transportOptions.sourceCodexHome).toBe("");
+        expect(input.environment.HOME).toBe("/remote/user");
+        expect(input.environment.CODEX_HOME).toBe(remoteCodexHome);
+        expect(input.environment.XDG_CONFIG_HOME).toBeUndefined();
+        expect(input.onCodexCredentialRefresh).toBeUndefined();
+        await input.onCleanupConfirmed();
+        return receipt("codex", "gpt-6.1-sol");
+      });
+      const result = await testNativeRunnerAuthentication({ ...sshContext, config: {
+        homeMode: "preconfigured", remoteCodexHome,
+        env: { CODEX_HOME: home, HOME: "/controller", XDG_CONFIG_HOME: "/controller/config" },
+      } }, "codex", "gpt-6.1-sol");
+      expect(result.status).toBe("pass");
+      expect(nativeProbe).toHaveBeenCalledOnce();
+      expect(await readlink(join(home, "auth.json"))).toBe(join(home, "missing-controller-login"));
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+  it("rejects a preconfigured SSH probe when the remote account home cannot be verified", async () => {
+    sshExecute.mockResolvedValue({ exitCode: 1, timedOut: false, stdout: "", stderr: "" });
+    const result = await testNativeRunnerAuthentication({ ...sshContext, config: { homeMode: "preconfigured" } }, "codex", "gpt-6.1-sol");
+    expect(result.status).toBe("fail");
+    expect(result.checks[0].message).toContain("runner_preconfigured_remote_home_unavailable");
+    expect(nativeProbe).not.toHaveBeenCalled();
+    expect(nativeArtifacts).not.toHaveBeenCalled();
+  });
   it.each(["local", "remote"].flatMap(transport => ["configured", "operator"].flatMap(source => [false, true].map(linked => ({ transport, source, linked })))))
   ("matches actual task auth seeding before $transport setup (source=$source, linked=$linked)", async ({ transport, source, linked }) => {
     const home = await realpath(await mkdtemp(join(tmpdir(), "native-unbound-auth-")));
