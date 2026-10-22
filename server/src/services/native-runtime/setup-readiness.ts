@@ -201,7 +201,7 @@ async function probeRemoteNativeCodex(options: {
 
 export async function testNativeRunnerAuthentication(context: AdapterEnvironmentTestContext, provider: "codex", model: string | null): Promise<AdapterEnvironmentTestResult> {
   const remote = context.executionTarget?.kind === "remote";
-  const preconfiguredHome = remote && context.executionTarget?.transport === "ssh"
+  const preconfiguredHome = context.executionTarget?.kind === "remote" && context.executionTarget.transport === "ssh"
     && context.config.homeMode === "preconfigured" && !context.managedAiCredentialHome;
   const configured = context.config.env;
   const environment: Record<string, string> = Object.fromEntries([
