@@ -1,6 +1,7 @@
+import { PRP_COMPLETION_TOOL_NAME, PRP_COMPLETION_RESULT_BRIDGE_INPUT_SCHEMA } from "../contracts/completion-result.js";
 import { RunnerLaunchPreparationStore } from "./runner-launch-preparation-store.js";
 import type { PreparedRunnerProviderLaunch, RunnerProviderLaunchRequirements } from "./runner-provider-launch.js";
-import { validatePreparedRunnerLaunch, runnerProviderLaunchRequirements, createRunnerProviderLaunch, createRunnerdCodexAppServerArgs, trustedRuntimeReadOnlyRoots } from "./runner-provider-launch.js";
+import { preparedRunnerLaunchWorkingDirectory, validatePreparedRunnerLaunch, runnerProviderLaunchRequirements, createRunnerProviderLaunch, createRunnerdCodexAppServerArgs, trustedRuntimeReadOnlyRoots } from "./runner-provider-launch.js";
 export { createRunnerdCodexAppServerArgs, resolveRunnerdAcpxPermissionMode, trustedRuntimeReadOnlyRoots, withCodexCollaborationRuntimeInstructions } from "./runner-provider-launch.js";
 import { applyProviderObservabilityEnvironment, redactObservabilityDiagnostic } from "../drivers/agent-observability.js";
 import type { RunnerExecutionDriver } from "../control-plane/runner-execution-driver.js";
@@ -725,6 +726,8 @@ async function releaseRunnerProcessOwnership(input: {
     ((settlement: "settled" | "unsettled") => Promise<void> | void) | null;
   forceKill: () => Promise<void> | void;
   release: (() => Promise<void> | void) | null;
+  processExitConfirmed?: () => boolean;
+  onExecutionStopped?: () => Promise<void> | void;
 }): Promise<void> {
   let releaseFailure: unknown;
   try {
@@ -750,6 +753,11 @@ async function releaseRunnerProcessOwnership(input: {
   }
   if (checkpointFailure !== undefined) throw checkpointFailure;
   if (releaseFailure !== undefined) throw releaseFailure;
+  // Lease release is not a stop receipt. Publish only after the authenticated
+  // provider drain, checkpoint, route release and exact process owner settle.
+  if (input.runnerSettled && input.processExitConfirmed?.() === true) {
+    await input.onExecutionStopped?.();
+  }
 }
 
 async function awaitRunnerSuspensionBarrier(input: {
@@ -849,11 +857,11 @@ async function awaitRunnerSuspensionBarrier(input: {
 }
 
 function runnerCloseGraceMs(options: Pick<CapabilityRunnerdCodexTransportOptions, "provider" | "acpxAgent" | "closeGraceMs">): number {
-  // Idle Pi retirement may consume its five-second RPC stop window. Keep a
-  // separate five-second drain round trip and the bounded suspension reserve.
+  // Native Pi retirement allows thirty seconds for snapshot cleanup and five
+  // for its lifetime fence. Keep a drain round trip and suspension reserve too.
   // Explicit caller deadlines remain authoritative; all settlement proofs stay
   // mandatory even when the provider already completed its task.
-  return options.closeGraceMs ?? (options.provider === "acpx" && options.acpxAgent === "pi" ? 15_000 : 10_000);
+  return options.closeGraceMs ?? (options.provider === "acpx" && options.acpxAgent === "pi" ? 45_000 : 10_000);
 }
 
 function runnerCloseDeadlines(
@@ -1298,6 +1306,9 @@ export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionD
   turnStartTimeoutMs?: number;
   onDiagnostic?: (message: string) => void;
   onEvidence?: (evidence: Readonly<CapabilityRunnerdProcessEvidence>) => void;
+  /** Exact authenticated authority whose provider and runner have stopped.
+   * Never called for controller detachment or an uncertain/failed close. */
+  onExecutionStopped?: (identity: Readonly<DurableRecoveryIdentity>) => Promise<void>;
   /** Persist process ownership immediately after spawn, before waiting for
    * provider bootstrap or activating a deferred PRP registration. */
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
@@ -3024,7 +3035,7 @@ function acpxProviderPackageAuthority(
     const workspaceRoot = dirname(serverRoot);
     // Source/Docker builds share the workspace's pnpm store. Published npm
     // bundles and self-rooted pnpm deployments retain their server authority.
-    if (basename(serverRoot) === "server" &&
+    if (agent !== "pi" && basename(serverRoot) === "server" &&
         !existsSync(resolve(serverRoot, "node_modules/.pnpm")) &&
         existsSync(resolve(workspaceRoot, "node_modules/.pnpm")) &&
         existsSync(resolve(workspaceRoot, "pnpm-workspace.yaml")) &&
@@ -3047,10 +3058,10 @@ function acpxProviderPackageAuthority(
     );
   }
   const sidecarPackageRoot = resolve(cliDirectory, "../..");
-  // Copilot's native closure belongs to the runner package itself. Its asset
+  // Native Pi and Copilot closures belong to the runner package itself. Their asset
   // guard requires the bound manifest directly inside that same package root;
   // the workspace dependency root used by JS providers is a different owner.
-  if (agent === "copilot") {
+  if (agent === "copilot" || agent === "pi") {
     return {
       root: sidecarPackageRoot,
       manifest: resolve(sidecarPackageRoot, "package.json"),
@@ -3213,7 +3224,7 @@ function authorizedToolSet(
       operationId: String(tool.name ?? ""),
       version: 1,
       description: String(tool.description ?? ""),
-      inputSchema: record(tool.inputSchema),
+      inputSchema: tool.name === PRP_COMPLETION_TOOL_NAME ? PRP_COMPLETION_RESULT_BRIDGE_INPUT_SCHEMA : record(tool.inputSchema),
       responseSchema: {},
     }))
     .sort((left, right) =>
@@ -3555,6 +3566,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   #durableTurnId = "";
   #authorizedTools: Record<string, unknown> | null = null;
   #runAttachTemplate: Record<string, unknown> | null = null;
+  #preparedWorkingDirectory: string | null = null;
   #closed = false;
   readonly #closedSignal: Promise<void>;
   #resolveClosedSignal!: () => void;
@@ -3902,6 +3914,11 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       recoveredTurns.unshift(...priorTerminals.values());
       this.#recoveryTurnBindingPending = false;
       this.#pumpEvents();
+      const prepared = this.#preparedThreadWorkingDirectory();
+      if (prepared.cwd !== undefined && typeof snapshot.cwd === "string"
+        && snapshot.cwd.length > 0 && snapshot.cwd !== prepared.cwd) {
+        throw new Error("runner_prepared_launch_working_directory_mismatch");
+      }
       return {
         thread: {
           id: this.#threadId,
@@ -3909,12 +3926,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ...(this.#providerIdentity === null
             ? {}
             : { providerIdentity: structuredClone(this.#providerIdentity) }),
-          cwd:
+          // Some providers omit cwd from their snapshot. A prepared launch
+          // supplies it; never fall back to a controller-local directory.
+          cwd: prepared.cwd ?? (
             typeof snapshot.cwd === "string" && snapshot.cwd.length > 0
               ? snapshot.cwd
               : (this.options.environment?.PAPERCLIP_WORKSPACE_CWD ??
                 this.options.runnerFilesystemRoot ??
-                tmpdir()),
+                tmpdir())),
           turns: recoveredTurns,
         },
       };
@@ -3959,6 +3978,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         );
       }
       return {
+        ...this.#preparedThreadWorkingDirectory(),
         thread: {
           id: this.#threadId,
           sessionId: this.#sessionId,
@@ -4705,6 +4725,10 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           this.#evidence.runnerSignal = result.signal as NodeJS.Signals | null;
         },
         release: this.#controlPlaneRelease,
+        processExitConfirmed: () => this.#evidence.runnerExited,
+        onExecutionStopped: this.options.onExecutionStopped && this.#core
+          ? () => this.options.onExecutionStopped!({ ...this.#core!.store.state.identity })
+          : undefined,
       });
     } finally {
       await this.#core?.stop();
@@ -4757,10 +4781,32 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#assertStartupOpen();
     const prepared = await this.options.prepareLaunch!(requirements, recovery);
     validatePreparedRunnerLaunch(requirements, prepared);
+    this.#recordPreparedWorkingDirectory(prepared);
     this.#assertStartupOpen();
     template.provider = prepared.provider;
     new RunnerLaunchPreparationStore(this.#root).save(requirements, prepared, this.#core!.store.state.identity);
     return prepared;
+  }
+
+  // The prepared launch is the only source of the provider directory. Core
+  // records it in session metadata; the session cannot move to another one.
+  #recordPreparedWorkingDirectory(prepared: PreparedRunnerProviderLaunch): void {
+    const workingDirectory = preparedRunnerLaunchWorkingDirectory(prepared);
+    if (workingDirectory === null) {
+      throw new Error("runner_prepared_launch_working_directory_unavailable");
+    }
+    if (this.#preparedWorkingDirectory !== null && this.#preparedWorkingDirectory !== workingDirectory) {
+      throw new Error("runner_prepared_launch_working_directory_changed");
+    }
+    this.#preparedWorkingDirectory = workingDirectory;
+  }
+
+  #preparedThreadWorkingDirectory(): { cwd?: string } {
+    if (!this.options.prepareLaunch) return {};
+    if (this.#preparedWorkingDirectory === null) {
+      throw new Error("runner_prepared_launch_working_directory_unavailable");
+    }
+    return { cwd: this.#preparedWorkingDirectory };
   }
 
   async #prepareLaunch(
@@ -4775,6 +4821,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         String(params.developerInstructions ?? params.baseInstructions ?? "You are a Paperclip agent."));
       const prepared = await this.options.prepareLaunch(requirements);
       validatePreparedRunnerLaunch(requirements, prepared);
+      this.#recordPreparedWorkingDirectory(prepared);
       this.#assertStartupOpen();
       new RunnerLaunchPreparationStore(this.#root).save(requirements, prepared, this.#core!.store.state.identity);
       const completionContract = record(params.completionContract);
@@ -5092,6 +5139,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     const acpxAgent = this.options.acpxAgent ?? "codex";
     return {
       model: this.#observedProviderModel,
+      ...this.#preparedThreadWorkingDirectory(),
       thread: {
         id: this.#threadId,
         sessionId: this.#sessionId,
@@ -7236,7 +7284,8 @@ export async function probeNativeRunnerEnvironment(options: {
     environment.HOME = resolve(remoteFilesystemRoot ?? options.runtimeDirectory, "probe-home");
     environment.CODEX_HOME = resolve(remoteFilesystemRoot ?? options.runtimeDirectory, "codex-home");
   }
-  environment.PAPERCLIP_WORKSPACE_CWD = workingDirectory;
+  // A prepared launch reports its own directory; Core does not assign one.
+  if (!ownsPreparation) environment.PAPERCLIP_WORKSPACE_CWD = workingDirectory;
   const bundle = createRunnerdCodexTransport({
     ...options.transportOptions,
     ...(options.transportOptions?.controlPlaneRegistration ? { controlPlaneRegistration: (authority, identity) => {
@@ -7289,7 +7338,8 @@ export async function probeNativeRunnerEnvironment(options: {
     environment,
     transportFactory: () => bundle.transport,
     requireProviderSessionIdentity: true,
-    ...(remoteFilesystemRoot || ownsPreparation ? { workingDirectoryAuthority: "remote_runner" as const } : {}),
+    ...(ownsPreparation ? { workingDirectoryAuthority: "runner_prepared_launch" as const }
+      : remoteFilesystemRoot ? { workingDirectoryAuthority: "remote_runner" as const } : {}),
   });
   let rejectAborted!: (error: unknown) => void;
   const aborted = new Promise<never>((_resolve, reject) => { rejectAborted = reject; });
