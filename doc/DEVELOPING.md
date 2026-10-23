@@ -3329,3 +3329,15 @@ in `_test` for `PAPERCLIP_MCP_SLEEP_TEST_DATABASE_URL`,
 `PAPERCLIP_DOT_RUNNER_TEST_DATABASE_URL`. The interaction-service regression suite
 also accepts `PAPERCLIP_INTERACTIONS_TEST_DATABASE_URL`. The suites migrate and write to those
 URLs; the sleep suite truncates company data between tests.
+
+### SSH stop receipt lease binding
+
+A Runner's durable `environmentLeaseId` is protocol scope, not necessarily an
+`environment_leases.id`. SSH uses a managed workspace id, or retains the first
+run's placeholder across projectless warm handoffs. Confirmed-close persistence
+must resolve exactly one lease owned by the authenticated current run, validate
+its frozen execution workspace binding and SSH endpoint, and use that row's real
+id in the receipt. Keep the protocol identity unchanged. Missing or ambiguous
+bindings fail closed; a successor's proof must not release its predecessor.
+Physical exit without the existing authenticated provider settlement still does
+not create an authenticated-close receipt.
