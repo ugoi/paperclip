@@ -1316,9 +1316,9 @@ export function IssuesList({
   const groupedContent = useMemo(() => baseGroupedContent.map((group) => ({
     ...group,
     items: enableAgentCreatedVisibilityFilter && !viewState.showAgentCreatedTasks && !viewState.routineTasksOnly && viewState.nestingEnabled && viewState.viewMode === "list"
-      ? includeIssueHierarchyContext(group.items, [...issues, ...hierarchy.issues])
+      ? includeIssueHierarchyContext(group.items, [...issues, ...hierarchy.issues], viewState.statuses)
       : group.items,
-  })), [baseGroupedContent, hierarchy.issues, issues, enableAgentCreatedVisibilityFilter, viewState.showAgentCreatedTasks, viewState.routineTasksOnly, viewState.nestingEnabled, viewState.viewMode]);
+  })), [baseGroupedContent, hierarchy.issues, issues, enableAgentCreatedVisibilityFilter, viewState.showAgentCreatedTasks, viewState.routineTasksOnly, viewState.nestingEnabled, viewState.viewMode, viewState.statuses]);
   const visibleListRowCount = groupedContent.reduce((total, group) => total + group.items.length, 0);
 
 
