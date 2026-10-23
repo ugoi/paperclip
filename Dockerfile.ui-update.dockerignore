@@ -19,3 +19,9 @@ ui/tsconfig.tsbuildinfo
 !packages/paperclip-runner/runner/crates/runner-core/tests/stdio_mcp.rs
 !packages/paperclip-runner/runner/crates/runner-core/tests/support
 !packages/paperclip-runner/runner/crates/runner-core/tests/support/codex_assigned_tool_validation.rs
+!packages/paperclip-runner/test-support
+!packages/paperclip-runner/test-support/local-integrity-boundary-golden.ts
+!packages/paperclip-runner/protocol
+!packages/paperclip-runner/protocol/fixtures
+!packages/paperclip-runner/protocol/fixtures/provider-boundary
+!packages/paperclip-runner/protocol/fixtures/provider-boundary/local-integrity.json
