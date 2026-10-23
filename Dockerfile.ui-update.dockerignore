@@ -1,0 +1,9 @@
+**
+!ui
+!ui/**
+ui/node_modules
+ui/dist
+ui/dist-preview
+ui/storybook-static
+ui/tsconfig.tsbuildinfo
+!Dockerfile.ui-update

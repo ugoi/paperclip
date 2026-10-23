@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1.20
+# UI-only updates reuse the accepted runtime and its exact worker artifacts.
+# The publishing workflow rejects non-UI application changes against this base.
+ARG PAPERCLIP_CORE_IMAGE=ghcr.io/ugoi/paperclip:stefan-ccce203d55fe35a728ee139b2e513f66cc176323-repack@sha256:7b2601ca5f3acaf29e939248c5f779cfc99deb2eba4d1eb7002912f5ef3ac561
+FROM ${PAPERCLIP_CORE_IMAGE} AS ui-build
+WORKDIR /app
+COPY ui/ ui/
+ARG PAPERCLIP_UI_BUILD_COMMIT
+RUN test -n "$PAPERCLIP_UI_BUILD_COMMIT" \
+  && NODE_ENV=test pnpm --dir ui exec vitest run --maxWorkers=2 --testTimeout=30000 src/lib/issue-hierarchy-context.test.ts src/lib/issue-filters.test.ts src/components/IssuesList.test.tsx \
+  && pnpm --filter @paperclipai/ui typecheck \
+  && pnpm check:token-gates \
+  && PAPERCLIP_BUILD_COMMIT="$PAPERCLIP_UI_BUILD_COMMIT" pnpm --filter @paperclipai/ui build
+RUN node -e 'require("node:fs").writeFileSync("ui/dist/build-revision.json", JSON.stringify({uiCommit:process.env.PAPERCLIP_UI_BUILD_COMMIT,coreCommit:process.env.PAPERCLIP_BUILD_COMMIT})+"\n")'
+
+FROM ${PAPERCLIP_CORE_IMAGE} AS production
+ARG PAPERCLIP_UI_BUILD_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/ugoi/paperclip" \
+  org.opencontainers.image.revision="${PAPERCLIP_UI_BUILD_COMMIT}" \
+  io.paperclip.ui.revision="${PAPERCLIP_UI_BUILD_COMMIT}" \
+  io.paperclip.core.revision="ccce203d55fe35a728ee139b2e513f66cc176323"
+ENV PAPERCLIP_UI_BUILD_COMMIT=${PAPERCLIP_UI_BUILD_COMMIT}
+COPY --chown=node:node ui/src/ /app/ui/src/
+COPY --chown=node:node --from=ui-build /app/ui/dist/ /app/ui/dist/
