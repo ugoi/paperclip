@@ -5,11 +5,16 @@ ARG PAPERCLIP_CORE_IMAGE=ghcr.io/ugoi/paperclip:stefan-ccce203d55fe35a728ee139b2
 FROM ${PAPERCLIP_CORE_IMAGE} AS ui-build
 WORKDIR /app
 COPY ui/ ui/
+RUN NODE_ENV=test pnpm --dir ui exec vitest run --maxWorkers=2 --testTimeout=30000 src/lib/issue-hierarchy-context.test.ts src/lib/issue-filters.test.ts src/components/IssuesList.test.tsx
+# The runtime image omits test/docs inputs used by the UI catalog typecheck.
+# Restore these unchanged source files only in the disposable build stage.
+COPY packages/paperclip-runner/README.md packages/paperclip-runner/
+COPY packages/paperclip-runner/runner/crates/runner-core/tests/support/codex_assigned_tool_validation.rs packages/paperclip-runner/runner/crates/runner-core/tests/support/
+COPY packages/paperclip-runner/runner/crates/runner-core/tests/stdio_mcp.rs packages/paperclip-runner/runner/crates/runner-core/tests/
+COPY packages/paperclip-runner/scripts/provision-pi-package.test.mjs packages/paperclip-runner/scripts/
+RUN pnpm --filter @paperclipai/ui typecheck && pnpm check:token-gates
 ARG PAPERCLIP_UI_BUILD_COMMIT
 RUN test -n "$PAPERCLIP_UI_BUILD_COMMIT" \
-  && NODE_ENV=test pnpm --dir ui exec vitest run --maxWorkers=2 --testTimeout=30000 src/lib/issue-hierarchy-context.test.ts src/lib/issue-filters.test.ts src/components/IssuesList.test.tsx \
-  && pnpm --filter @paperclipai/ui typecheck \
-  && pnpm check:token-gates \
   && PAPERCLIP_BUILD_COMMIT="$PAPERCLIP_UI_BUILD_COMMIT" pnpm --filter @paperclipai/ui build
 RUN node -e 'require("node:fs").writeFileSync("ui/dist/build-revision.json", JSON.stringify({uiCommit:process.env.PAPERCLIP_UI_BUILD_COMMIT,coreCommit:process.env.PAPERCLIP_BUILD_COMMIT})+"\n")'
 
