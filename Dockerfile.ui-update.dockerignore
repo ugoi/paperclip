@@ -7,3 +7,15 @@ ui/dist-preview
 ui/storybook-static
 ui/tsconfig.tsbuildinfo
 !Dockerfile.ui-update
+!packages
+!packages/paperclip-runner
+!packages/paperclip-runner/README.md
+!packages/paperclip-runner/scripts
+!packages/paperclip-runner/scripts/provision-pi-package.test.mjs
+!packages/paperclip-runner/runner
+!packages/paperclip-runner/runner/crates
+!packages/paperclip-runner/runner/crates/runner-core
+!packages/paperclip-runner/runner/crates/runner-core/tests
+!packages/paperclip-runner/runner/crates/runner-core/tests/stdio_mcp.rs
+!packages/paperclip-runner/runner/crates/runner-core/tests/support
+!packages/paperclip-runner/runner/crates/runner-core/tests/support/codex_assigned_tool_validation.rs
