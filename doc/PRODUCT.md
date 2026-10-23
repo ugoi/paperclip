@@ -108,7 +108,9 @@ recovery/watchdog tasks, chat-channel tasks, and other automation. Channel tasks
 remain bot-created for this filter even when a human starts the conversation. The choice is saved per company
 and collection; Clear filters restores the hidden default. Nested lists preserve
 ancestors and expandable subtasks as context without promoting unrelated automated
-work to independent results. Agent profiles, routine histories, and task-detail
+work to independent results. Selected status filters also apply to hierarchy context;
+matching descendants remain visible even when an intermediate parent's status is hidden.
+Agent profiles, routine histories, and task-detail
 subtasks retain their full history.
 
 Mine contains personal work. Channel tasks, routine tasks, and agent-created tasks
