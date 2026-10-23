@@ -10,7 +10,7 @@ import { hasStopOnlyCleanup, prepareSandboxStopAndRetain, readStopOnlyCleanup, s
 import { JsonRpcCallError, readEnvironmentAcquisitionDiagnostic, readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { preserveEnvironmentSyncOutErrorDiagnostic } from "./environment-sync-out-error.js";
 import { captureEnvironmentAcquisitionDiagnostic } from "./environment-acquisition-diagnostics.js";
-import { remoteTerminationReceipt } from "./remote-execution-termination.js";
+import { hasRemoteTerminationReceipt, remoteTerminationReceipt } from "./remote-execution-termination.js";
 import { hasNativeWorkspaceExportResume, releaseCompletedNativeWorkspaceExportRetention } from "./native-runtime/native-workspace-export-resume.js";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
@@ -1236,7 +1236,19 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
     },
 
     async releaseRunLease(input) {
-      return await environmentsSvc.releaseLease(input.lease.id, input.status);
+      return db.transaction(async tx => {
+        const [current] = await tx.select().from(environmentLeases)
+          .where(eq(environmentLeases.id, input.lease.id)).for("update");
+        if (!current || current.companyId !== input.lease.companyId ||
+            current.heartbeatRunId !== input.lease.heartbeatRunId ||
+            current.provider !== "ssh" || current.providerLeaseId !== input.lease.providerLeaseId) return null;
+        // A finalizer may have selected an active lease before the confirmed
+        // Runner close released it. Its stale bookkeeping must not erase the
+        // exact termination receipt. A reacquired active lease has no such
+        // authority and still takes the ordinary release path below.
+        if (hasRemoteTerminationReceipt(current)) return toEnvironmentLeaseSnapshot(current);
+        return environmentService(tx as unknown as Db).releaseLease(current.id, input.status);
+      });
     },
 
     async realizeWorkspace(input) {

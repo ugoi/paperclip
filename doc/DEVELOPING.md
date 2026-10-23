@@ -693,7 +693,9 @@ authenticated provider drain, suspended checkpoint, route release, and exact
 process exit are confirmed. The current run, Runner instance, session, and SSH
 endpoint must still match. Uncertain close, controller detachment, stale warm
 authority, and another lease on the same host cannot supply that receipt. This
-does not repair historical executions that never recorded stop evidence.
+does not repair historical executions that never recorded stop evidence. A late
+SSH bookkeeping release re-reads the exact lease under a lock and preserves an
+already confirmed terminal receipt. Reactivated leases still require new proof.
 
 Focused checks: `server/src/services/native-runtime/ssh-runner-termination.test.ts`
 and the execution-stop/containment cases in
