@@ -726,6 +726,8 @@ async function releaseRunnerProcessOwnership(input: {
     ((settlement: "settled" | "unsettled") => Promise<void> | void) | null;
   forceKill: () => Promise<void> | void;
   release: (() => Promise<void> | void) | null;
+  processExitConfirmed?: () => boolean;
+  onExecutionStopped?: () => Promise<void> | void;
 }): Promise<void> {
   let releaseFailure: unknown;
   try {
@@ -751,6 +753,11 @@ async function releaseRunnerProcessOwnership(input: {
   }
   if (checkpointFailure !== undefined) throw checkpointFailure;
   if (releaseFailure !== undefined) throw releaseFailure;
+  // Lease release is not a stop receipt. Publish only after the authenticated
+  // provider drain, checkpoint, route release and exact process owner settle.
+  if (input.runnerSettled && input.processExitConfirmed?.() === true) {
+    await input.onExecutionStopped?.();
+  }
 }
 
 async function awaitRunnerSuspensionBarrier(input: {
@@ -1299,6 +1306,9 @@ export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionD
   turnStartTimeoutMs?: number;
   onDiagnostic?: (message: string) => void;
   onEvidence?: (evidence: Readonly<CapabilityRunnerdProcessEvidence>) => void;
+  /** Exact authenticated authority whose provider and runner have stopped.
+   * Never called for controller detachment or an uncertain/failed close. */
+  onExecutionStopped?: (identity: Readonly<DurableRecoveryIdentity>) => Promise<void>;
   /** Persist process ownership immediately after spawn, before waiting for
    * provider bootstrap or activating a deferred PRP registration. */
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
@@ -4715,6 +4725,10 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           this.#evidence.runnerSignal = result.signal as NodeJS.Signals | null;
         },
         release: this.#controlPlaneRelease,
+        processExitConfirmed: () => this.#evidence.runnerExited,
+        onExecutionStopped: this.options.onExecutionStopped && this.#core
+          ? () => this.options.onExecutionStopped!({ ...this.#core!.store.state.identity })
+          : undefined,
       });
     } finally {
       await this.#core?.stop();

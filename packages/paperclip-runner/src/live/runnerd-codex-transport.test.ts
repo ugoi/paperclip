@@ -1509,6 +1509,37 @@ it("refuses session reuse when asynchronous process containment fails", async ()
   })).rejects.toThrow("remote process still alive");
 });
 
+it("records execution stop only after settled provider, route, checkpoint and process exit", async () => {
+  const steps: string[] = [];
+  let exited = false;
+  await runnerdRecoveryInternals.releaseRunnerProcessOwnership({
+    runnerSettled: true,
+    release: () => { steps.push("route"); },
+    checkpoint: () => { steps.push("checkpoint"); },
+    forceKill: async () => { await new Promise<void>(resolve => setImmediate(resolve)); exited = true; steps.push("exit"); },
+    processExitConfirmed: () => exited,
+    onExecutionStopped: () => { steps.push("receipt"); },
+  });
+  expect(steps).toEqual(["route", "checkpoint", "exit", "receipt"]);
+});
+
+it.each(["unsettled", "exit_unknown", "route_failed", "checkpoint_failed", "containment_failed", "receipt_failed"] as const)(
+  "retains missing termination proof when %s", async failure => {
+    let acknowledged = false;
+    const result = runnerdRecoveryInternals.releaseRunnerProcessOwnership({
+      runnerSettled: failure !== "unsettled",
+      release: () => { if (failure === "route_failed") throw Error(failure); },
+      checkpoint: () => { if (failure === "checkpoint_failed") throw Error(failure); },
+      forceKill: () => { if (failure === "containment_failed") throw Error(failure); },
+      processExitConfirmed: () => failure !== "exit_unknown",
+      onExecutionStopped: () => { if (failure === "receipt_failed") throw Error(failure); acknowledged = true; },
+    });
+    if (failure.endsWith("failed")) await expect(result).rejects.toThrow(failure);
+    else await result;
+    expect(acknowledged).toBe(false);
+  },
+);
+
 it("waits for the exact durable suspension command behind prior close work", async () => {
   const commands = [
     {
@@ -9141,9 +9172,15 @@ it.each(["ordinary", "trusted-host", "trusted-host-plan"] as const)("launches an
   const auth = '{"user_owned":true}';
   await writeFile(join(codexHome, "config.toml"), config);
   await writeFile(join(codexHome, "auth.json"), auth);
+  const stopped: unknown[] = [];
+  const identity = { runId: "run-ssh-stop", environmentLeaseId: "lease-ssh-stop",
+    runnerInstanceId: "runner-ssh-stop", normalizedSessionId: "session-ssh-stop",
+    turnId: "turn-ssh-stop", itemId: "item-ssh-stop" };
   const bundle = createCapabilityRunnerdCodexTransport({
     homeMode: "preconfigured", environment: { ...process.env, HOME: home, CODEX_HOME: codexHome },
     trustedHostFullAccess,
+    prpIdentity: identity,
+    onExecutionStopped: async observed => { stopped.push(observed); },
     runnerBinary: resolve(import.meta.dirname, "../../runner/target/debug/paperclip-runnerd"),
     codexCommand: fakeCodex, codexArgs: fakeCodexArgs(stateDirectory, "--request-log", calls), stateDirectory,
   });
@@ -9162,6 +9199,10 @@ it.each(["ordinary", "trusted-host", "trusted-host-plan"] as const)("launches an
       expect(thread).not.toHaveProperty("sandbox");
     }
     await bundle.transport.close();
+    expect(bundle.evidence().runnerExited).toBe(true);
+    expect(stopped).toEqual([identity]);
+    await bundle.transport.close();
+    expect(stopped).toHaveLength(1);
     expect(await readFile(join(codexHome, "config.toml"), "utf8")).toBe(config);
     expect(await readFile(join(codexHome, "auth.json"), "utf8")).toBe(auth);
     await expect(stat(join(stateDirectory, "codex-home"))).rejects.toMatchObject({ code: "ENOENT" });

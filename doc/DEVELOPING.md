@@ -687,6 +687,18 @@ npx paperclipai allowed-hostname dotta-macbook-pro
 
 ## Agent status recovery
 
+SSH lease release is bookkeeping and does not prove a Runner stopped. A native
+Runner close records a run- and lease-bound termination receipt only after the
+authenticated provider drain, suspended checkpoint, route release, and exact
+process exit are confirmed. The current run, Runner instance, session, and SSH
+endpoint must still match. Uncertain close, controller detachment, stale warm
+authority, and another lease on the same host cannot supply that receipt. This
+does not repair historical executions that never recorded stop evidence.
+
+Focused checks: `server/src/services/native-runtime/ssh-runner-termination.test.ts`
+and the execution-stop/containment cases in
+`packages/paperclip-runner/src/live/runnerd-codex-transport.test.ts`.
+
 Heartbeat completion locks the agent row before it reads remaining running work
 and writes the agent status. A concurrent execution start cannot be overwritten
 by a completion that read older run state. Run terminalization and agent status
