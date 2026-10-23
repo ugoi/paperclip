@@ -41,6 +41,19 @@ Both fresh startup and session recovery exercise this boundary.
 
 ## Building and operating
 
+For the nested status-filter correction, `Dockerfile.ui-update` rebuilds only
+the UI on the immutable accepted `ccce203` image. Its workflow rejects changes
+to the backend, worker sources or dependency manifests. It runs the relevant
+UI regression tests, UI typecheck and token gates before building the browser
+assets. This preserves the exact Linux and Darwin worker bytes and avoids
+changing an unrelated runtime during a UI repair.
+
+The image's `io.paperclip.ui.revision` label and `/build-revision.json` record
+the new UI source. `io.paperclip.core.revision` and `/api/health` retain the
+unchanged backend revision. The image digest identifies the complete deployed
+combination. Use the normal full-source workflow for backend, dependency or
+worker changes. The normal build also includes the filter correction.
+
 Build the Linux Core from the normal `Dockerfile`, supplying the full reviewed Git
 commit as `PAPERCLIP_BUILD_COMMIT`. Build the Darwin arm64 runner from the exact same
 commit on macOS, using the package-owned Rust toolchain and Cargo lockfile. Preserve
