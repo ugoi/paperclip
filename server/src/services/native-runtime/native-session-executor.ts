@@ -78,6 +78,7 @@ import { uploadVerifiedProviderPack } from "./provider-pack-upload.js";
 import { selectRemotePiCompanion } from "./remote-pi-companion.js";
 import { readNativeLocalProcessStop, PROCESS_START_REQUESTED, withReleasedNativeRunProcess } from "../native-local-process-stop.js";
 import { remoteLeaseCleanupScope } from "../remote-execution-termination.js";
+import { recordSshRunnerTermination } from "./ssh-runner-termination.js";
 import { connectorToolDefinitionsForSkills } from "../connector-runtime.js";
 import { setNativeExecutionActive } from "./native-active-runs.js";
 import { preserveNativeFailedWorkspace } from "./native-failed-workspace-recovery.js";
@@ -14134,6 +14135,20 @@ async function createRunnerdBackendWithinSessionClaim(
           if (!current || !recoveryUsage) throw new Error("native_recovery_usage_source_unproven");
           await current.acceptRecoveryAccountingEvent(event, () => recoveryUsage(event, source));
         } : undefined,
+        onExecutionStopped: remoteTarget?.transport === "ssh"
+          ? async identity => {
+              // Warm close belongs to the current authenticated authority, not
+              // the run/lease that originally constructed this transport.
+              if (identity.normalizedSessionId !== nativeSessionKey(input.execution)) return;
+              await recordSshRunnerTermination(input.db, {
+                companyId: input.execution.binding.companyId,
+                agentId: input.execution.binding.agentId, ...identity,
+                ssh: { host: remoteTarget.spec.host, port: remoteTarget.spec.port,
+                  username: remoteTarget.spec.username,
+                  remoteWorkspacePath: remoteTarget.spec.remoteWorkspacePath },
+              });
+            }
+          : undefined,
         onCredentialsUpdated: (event) => appendNativeCredentialUpdate(input.db, {
           companyId: input.execution.binding.companyId,
           agentId: input.execution.binding.agentId,
