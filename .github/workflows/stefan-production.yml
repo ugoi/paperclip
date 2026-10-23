@@ -4,6 +4,11 @@ on:
   push:
     branches: [deploy/stefan-production]
   workflow_dispatch:
+    inputs:
+      ui_only:
+        description: Rebuild only UI on the accepted immutable runtime
+        type: boolean
+        default: false
 
 permissions: {}
 concurrency:
@@ -11,8 +16,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ui:
+    if: github.repository == 'ugoi/paperclip' && inputs.ui_only == true
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/stefan-ui-update.yml
   core:
-    if: github.repository == 'ugoi/paperclip'
+    if: github.repository == 'ugoi/paperclip' && inputs.ui_only != true
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
@@ -51,7 +62,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
   darwin:
-    if: github.repository == 'ugoi/paperclip'
+    if: github.repository == 'ugoi/paperclip' && inputs.ui_only != true
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
