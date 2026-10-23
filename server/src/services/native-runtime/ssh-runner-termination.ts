@@ -9,6 +9,7 @@ export interface SshRunnerStopAuthority {
   runId: string;
   runnerInstanceId: string;
   normalizedSessionId: string;
+  /** Authenticated durable protocol scope, not necessarily a database lease id. */
   environmentLeaseId: string;
   ssh: { host: string; port: number; username: string; remoteWorkspacePath: string };
 }
@@ -25,12 +26,25 @@ export async function recordSshRunnerTermination(db: Db, authority: SshRunnerSto
     if (!run || run.runtimeMode !== "native" || run.agentId !== authority.agentId ||
         run.runnerInstanceId !== authority.runnerInstanceId ||
         run.nativeSessionId !== authority.normalizedSessionId) return false;
-    const [lease] = await tx.select().from(environmentLeases).where(and(
-      eq(environmentLeases.id, authority.environmentLeaseId),
+    // SSH's durable environment identity can be a workspace id, or the
+    // original run placeholder across projectless warm handoffs. Resolve the
+    // current authenticated run's actual lease instead of treating that scope
+    // as a database primary key or capturing the transport constructor's lease.
+    const execution = run.runnerProfileJson?.nativeExecutionInput as
+      { binding?: Record<string, unknown> } | undefined;
+    const binding = execution?.binding;
+    if (!binding || binding.companyId !== run.companyId || binding.agentId !== run.agentId ||
+        binding.runId !== run.id || typeof binding.executionWorkspaceId !== "string" ||
+        !binding.executionWorkspaceId || !authority.environmentLeaseId) return false;
+    const leases = await tx.select().from(environmentLeases).where(and(
       eq(environmentLeases.companyId, authority.companyId),
       eq(environmentLeases.heartbeatRunId, authority.runId),
     )).for("update");
-    if (!lease || lease.provider !== "ssh" || !lease.providerLeaseId ||
+    // Multiple rows are ambiguous authority, even if they share an SSH endpoint.
+    if (leases.length !== 1) return false;
+    const lease = leases[0]!;
+    if (lease.provider !== "ssh" || !lease.providerLeaseId ||
+        (lease.executionWorkspaceId ?? run.id) !== binding.executionWorkspaceId ||
         lease.metadata?.host !== authority.ssh.host || lease.metadata?.port !== authority.ssh.port ||
         lease.metadata?.username !== authority.ssh.username ||
         lease.metadata?.remoteWorkspacePath !== authority.ssh.remoteWorkspacePath ||
@@ -44,7 +58,8 @@ export async function recordSshRunnerTermination(db: Db, authority: SshRunnerSto
       lease.status === "active" ? "released" : lease.status as "released" | "expired" | "failed", {
         cleanupStatus: "success",
         remoteExecutionTermination: { ...receipt, proof: "authenticated_runner_close",
-          runnerInstanceId: authority.runnerInstanceId, normalizedSessionId: authority.normalizedSessionId },
+          runnerInstanceId: authority.runnerInstanceId, normalizedSessionId: authority.normalizedSessionId,
+          durableEnvironmentLeaseId: authority.environmentLeaseId },
       });
     return true;
   });
