@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
@@ -7,8 +8,10 @@ import type { CurrentUserRedactionOptions } from "../../log-redaction.js";
 import { publishLiveEvent } from "../live-events.js";
 import { getHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.js";
 import { createHeartbeatRunState } from "./run-state.js";
+import { heartbeatService } from "../heartbeat.js";
 import { createHeartbeatRunPreparation } from "./run-preparation.js";
 import { createHeartbeatLifecycle, persistHeartbeatRunProcessMetadata, type HeartbeatLifecycleDependencies } from "./run-lifecycle.js";
+import { DELIVERY_QUEUES, subscribeDeliveryWork } from "../delivery-work-notifications.js";
 
 vi.mock("../live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 
@@ -18,7 +21,7 @@ function callbacks(db: Db) {
   return {
     ...state,
     ...createHeartbeatRunPreparation(db),
-    getRun: vi.fn(state.getRun),
+    getRunStatus: vi.fn(state.getRunStatus),
     issuesSvc: {
       addComment: vi.fn<HeartbeatLifecycleDependencies["issuesSvc"]["addComment"]>(),
       listReviewAttention: vi.fn<HeartbeatLifecycleDependencies["issuesSvc"]["listReviewAttention"]>(),
@@ -83,10 +86,23 @@ describe("heartbeat lifecycle module boundary", () => {
     const database = guardedDatabase();
     const deps = callbacks(database.db);
     const run = { id: "late-progress", companyId: "company", agentId: "agent", status: "running", contextSnapshot: {} } as Run;
-    deps.getRun.mockResolvedValue({ ...run, status: "succeeded" });
+    deps.getRunStatus.mockResolvedValue({ ...run, status: "succeeded" });
     expect(await createHeartbeatLifecycle(database.db, deps).recordCurrentHeartbeatRunRuntimeProgress(run, { phase: "finalize", message: "late update" }, null)).toBeNull();
-    expect(deps.getRun).toHaveBeenCalledWith(run.id);
+    expect(deps.getRunStatus).toHaveBeenCalledWith(run.id);
     expect(getHeartbeatRunRuntimeStatus(run.id)).toBeNull();
+    expect(database.access).not.toHaveBeenCalled();
+  });
+
+  it("does not publish progress when the current status read fails", async () => {
+    const database = guardedDatabase();
+    const deps = callbacks(database.db);
+    deps.getRunStatus.mockRejectedValue(new Error("status read failed"));
+    const run = { id: "unavailable-progress", companyId: "company", agentId: "agent", status: "running" };
+    vi.mocked(publishLiveEvent).mockClear();
+    await expect(createHeartbeatLifecycle(database.db, deps)
+      .recordCurrentHeartbeatRunRuntimeProgress(run, { phase: "restore", message: "restoring" }, null))
+      .rejects.toThrow("status read failed");
+    expect(publishLiveEvent).not.toHaveBeenCalled();
     expect(database.access).not.toHaveBeenCalled();
   });
 });
@@ -116,6 +132,53 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, wakeupRequestId: wake.id, status: "running", runtimeMode: "native", ...patch }).returning();
     return { company, agent, wake, run };
   }
+
+  it.each(["succeeded", "failed", "cancelled", "timed_out", "interrupted", "deleted"])(
+    "rechecks progress after a run becomes %s without reading its large payloads",
+    async (status) => {
+      const { run } = await fixture({
+        contextSnapshot: { prompt: randomBytes(128 * 1024).toString("hex") },
+        runnerProfileJson: { configuration: randomBytes(128 * 1024).toString("hex") },
+        resultJson: { providerData: randomBytes(128 * 1024).toString("hex") },
+      });
+      const deps = callbacks(db);
+      const lifecycle = createHeartbeatLifecycle(db, deps);
+      const update = { phase: "restore" as const, message: "Restoring workspace", currentToolName: "sync" };
+      const progress = await lifecycle.recordCurrentHeartbeatRunRuntimeProgress(run, update, null);
+      expect(progress).toMatchObject({
+        companyId: run.companyId, agentId: run.agentId, runId: run.id,
+        phase: update.phase, message: update.message, currentToolName: "sync",
+      });
+      expect(await deps.getRunStatus.mock.results[0].value).toEqual({
+        id: run.id, companyId: run.companyId, agentId: run.agentId, status: "running",
+      });
+      expect(publishLiveEvent).toHaveBeenCalledTimes(1);
+      expect(publishLiveEvent).toHaveBeenCalledWith(expect.objectContaining({
+        companyId: run.companyId,
+        type: "heartbeat.run.progress",
+        payload: expect.objectContaining({ runId: run.id, agentId: run.agentId, phase: update.phase, message: update.message }),
+      }));
+
+      if (status === "deleted") await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+      else await db.update(heartbeatRuns).set({ status }).where(eq(heartbeatRuns.id, run.id));
+
+      expect(await lifecycle.recordCurrentHeartbeatRunRuntimeProgress(run, update, null)).toBeNull();
+      expect(deps.getRunStatus).toHaveBeenCalledTimes(2);
+      expect(getHeartbeatRunRuntimeStatus(run.id)).toBeNull();
+      expect(publishLiveEvent).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("wires fresh progress status reads through the public heartbeat service", async () => {
+    const { run } = await fixture();
+    const service = heartbeatService(db);
+    const update = { phase: "config_sync" as const, message: "Syncing workspace" };
+    expect(await service.recordRuntimeProgress(run, update, null)).toMatchObject({ runId: run.id, message: update.message });
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, run.id));
+    expect(await service.recordRuntimeProgress(run, update, null)).toBeNull();
+    expect(getHeartbeatRunRuntimeStatus(run.id)).toBeNull();
+    expect(publishLiveEvent).toHaveBeenCalledTimes(1);
+  });
 
   it("preserves sandbox process birth instead of inspecting a colliding controller PID", async () => {
     const { run } = await fixture();
@@ -159,6 +222,43 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     await createHeartbeatLifecycle(db, callbacks(db))[operation](run.id, "succeeded", { usageJson: { inputTokens: 8, outputTokens: 3 } });
     const [persisted] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     expect(persisted.usageJson).toEqual({ accountingReceiptReady: false, usageSource: "per_run", inputTokens: 8, outputTokens: 3 });
+  });
+
+  it.each(["setRunStatus", "setRunStatusIfRunning"] as const)("signals committed terminal accounting before %s publishes a failed live event", async operation => {
+    const { run } = await fixture({ costAccountingPending: true });
+    const settled = vi.fn();
+    const unsubscribe = subscribeDeliveryWork(db, DELIVERY_QUEUES.accounting, settled);
+    vi.mocked(publishLiveEvent).mockImplementationOnce(() => { throw new Error("Live publication unavailable"); });
+    try {
+      await expect(createHeartbeatLifecycle(db, callbacks(db))[operation](run.id, "succeeded", { finishedAt: new Date() }))
+        .rejects.toThrow("Live publication unavailable");
+      const [persisted] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+      expect(persisted.status).toBe("succeeded");
+      expect(persisted.costAccountingPending).toBe(true);
+      expect(settled).toHaveBeenCalledOnce();
+    } finally { unsubscribe(); }
+  });
+
+  it("does not request accounting for an unchanged running status", async () => {
+    const { run } = await fixture();
+    const settled = vi.fn();
+    const unsubscribe = subscribeDeliveryWork(db, DELIVERY_QUEUES.accounting, settled);
+    try {
+      await createHeartbeatLifecycle(db, callbacks(db)).setRunStatus(run.id, "running");
+      expect(settled).not.toHaveBeenCalled();
+    } finally { unsubscribe(); }
+  });
+
+  it("signals legacy terminal accounting after the nested terminalizer transaction commits", async () => {
+    const { run } = await fixture({ runtimeMode: "legacy", costAccountingPending: true });
+    const settled = vi.fn();
+    const unsubscribe = subscribeDeliveryWork(db, DELIVERY_QUEUES.accounting, settled);
+    try {
+      const result = await createHeartbeatLifecycle(db, callbacks(db)).setRunStatusIfRunning(run.id, "failed", { finishedAt: new Date() });
+      expect(result.updated).toBe(true);
+      expect(result.run?.status).toBe("failed");
+      expect(settled).toHaveBeenCalledOnce();
+    } finally { unsubscribe(); }
   });
 
   it.each(["claimed", "cancelled"] as const)("settles a %s wake without reviving a revoked request", async (status) => {

@@ -1,5 +1,7 @@
+import { insertIssueComment } from "./issue-comment-writes.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
 import { readNativeMonitorSource } from "./native-runtime/native-monitor-delivery.js";
+import { readNativeContinuationSource } from "./native-runtime/native-continuation-delivery.js";
 import { assertNoCaseHandoffMutation, cancelCaseHandoffsForIssue, completeTerminalCaseHandoffsForIssue } from "./heartbeat/case-handoff-lifecycle.js";
 import { measureRunPhase } from "./execution-preparation-timing.js";
 import { automaticReadRecoveryCleanupCondition, directHumanCommentCondition, humanCreatedIssueCondition, pendingUserRequestCondition, touchedByUserCondition } from "./issue-participation.js";
@@ -10,6 +12,7 @@ import { type TaskWorkspaceSelection, type TaskWorkspaceIntent } from "@papercli
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { notifyChatPublicationWork } from "./chat-work-notifications.js";
 import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
+import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
@@ -27,6 +30,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { isExplicitContinuationRetryClaim } from "./explicit-continuation-retry-claim.js";
 import { markdownToPlainText, parseMarkdown } from "chat";
+import { listExternalReviewWaits } from "./native-runtime/external-review-wait.js";
 import {
   and,
   asc,
@@ -1393,6 +1397,12 @@ export async function resolveChatOriginPublicationBindings(
     }
     if (contextSource === "issue.monitor") {
       const sourceRunId = await readNativeMonitorSource(dbOrTx, { companyId, issueId, runId: originRunId });
+      if (!sourceRunId) return [];
+      originRunId = sourceRunId;
+      continue;
+    }
+    if (contextSource === "native_status_decision") {
+      const sourceRunId = await readNativeContinuationSource(dbOrTx, { companyId, issueId, runId: originRunId });
       if (!sourceRunId) return [];
       originRunId = sourceRunId;
       continue;
@@ -4474,6 +4484,8 @@ function reviewPathLabel(
       return "Linked approval";
     case "monitor":
       return "Scheduled review monitor";
+    case "external_response":
+      return "Waiting for an external update";
     case "human_reviewer":
       return "Human reviewer";
     case "active_run":
@@ -4738,6 +4750,7 @@ async function listIssueReviewAttentionMap(
     queuedWakeRequests: wakeRows,
     pendingInteractions: interactionRows,
     pendingApprovals: approvalRows,
+    externalResponseWaits: await listExternalReviewWaits(dbOrTx, companyId, reviewIds),
     openRecoveryIssues: recoveryPaths,
     now: new Date(),
   };
@@ -5839,6 +5852,7 @@ async function listIssueBlockedInboxAttentionMap(
     });
 
   const findings = classifyIssueGraphLiveness({
+    externalResponseWaits: await listExternalReviewWaits(dbOrTx, companyId, graphIssues.filter(issue => issue.status === "in_review").map(issue => issue.id)),
     issues: graphIssues.map((issue) => ({
       id: issue.id,
       companyId: issue.companyId,
@@ -7904,15 +7918,12 @@ export function issueService(db: Db) {
       );
     if (!parent) return null;
 
-    const [comment] = await dbOrTx
-      .insert(issueComments)
-      .values({
-        companyId: child.companyId,
-        issueId: parent.id,
-        authorType: "system",
-        body,
-      })
-      .returning();
+    const [comment] = await insertIssueComment(dbOrTx, {
+      companyId: child.companyId,
+      issueId: parent.id,
+      authorType: "system",
+      body,
+    });
     await dbOrTx
       .update(issues)
       .set({ updatedAt: new Date() })
@@ -10229,7 +10240,7 @@ export function issueService(db: Db) {
           if (projectWorkspaceId && isolatedWorkspacesEnabled) {
             const sourceStrategy = await executionWorkspaceService(db).resolveSourceWorkspaceStrategy({ companyId,
               assigneeAgentId: issueData.assigneeAgentId, assigneeAdapterOverrides: issueData.assigneeAdapterOverrides,
-              executionWorkspaceSettings, executionWorkspacePolicy: projectPolicy,
+              executionWorkspaceSettings, executionWorkspacePolicy: projectPolicy, sourceWorkspaceId: projectWorkspaceId,
               typedSelection: false, projectId: issueData.projectId, executionPolicy: issueData.executionPolicy }, tx);
             if (sourceStrategy === "git_worktree") workspaceIntent = { version: 1, source: "project",
               selection: { kind: "configured_source", projectWorkspaceId, mode: "managed_isolated" } };
@@ -10242,7 +10253,7 @@ export function issueService(db: Db) {
           if (!readableSource) throw notFound("Workspace source is unavailable or inaccessible");
           await executionWorkspaceService(db).resolveSourceWorkspaceStrategy({ companyId,
             assigneeAgentId: issueData.assigneeAgentId, assigneeAdapterOverrides: issueData.assigneeAdapterOverrides,
-            executionWorkspaceSettings, executionWorkspacePolicy: readableSource.executionWorkspacePolicy,
+            executionWorkspaceSettings, executionWorkspacePolicy: readableSource.executionWorkspacePolicy, sourceWorkspaceId: projectWorkspaceId,
             typedSelection: Boolean(workspaceIntent), projectId: issueData.projectId, executionPolicy: issueData.executionPolicy }, tx);
           await assertTaskWorkspaceSourceProjectAccess(tx, workspaceActor, companyId, readableSource.projectId);
         }
@@ -11691,6 +11702,7 @@ export function issueService(db: Db) {
         let removedIssue;
         try {
           await notifyTerminalWorkspaceWork(tx, `issue:${id}`);
+          await requestRestorePointDeletion(tx, { sourceIssueId: id });
           removedIssue = await tx
             .delete(issues)
             .where(eq(issues.id, id))
@@ -12797,27 +12809,24 @@ export function issueService(db: Db) {
         }
       }
       if (!comment) {
-        [comment] = await measureRunPhase("response.write", () => dbOrTx
-          .insert(issueComments)
-          .values({
-            companyId: issue.companyId,
-            issueId,
-            authorAgentId: actor.agentId ?? null,
-            authorUserId: actor.userId ?? null,
-            onBehalfOfUserId,
-            authorType,
-            createdByRunId,
-            body: redactedBody,
-            clientRequestId: options?.clientRequestId ?? null,
-            presentation,
-            metadata,
-            sourceTrust: options?.sourceTrust ?? null,
-            createdAt: validCreatedAt ?? currentInsertTimestamp!,
-            ...(currentInsertTimestamp
-              ? { updatedAt: currentInsertTimestamp }
-              : {}),
-          })
-          .returning());
+        [comment] = await measureRunPhase("response.write", () => insertIssueComment(dbOrTx, {
+          companyId: issue.companyId,
+          issueId,
+          authorAgentId: actor.agentId ?? null,
+          authorUserId: actor.userId ?? null,
+          onBehalfOfUserId,
+          authorType,
+          createdByRunId,
+          body: redactedBody,
+          clientRequestId: options?.clientRequestId ?? null,
+          presentation,
+          metadata,
+          sourceTrust: options?.sourceTrust ?? null,
+          createdAt: validCreatedAt ?? currentInsertTimestamp!,
+          ...(currentInsertTimestamp
+            ? { updatedAt: currentInsertTimestamp }
+            : {}),
+        }));
       }
       if (!comment) throw new Error("Failed to create issue comment");
       if (options?.completionReply && actor.agentId && createdByRunId) await acknowledgeChatCompletionReply(dbOrTx, createdByRunId, comment.id);

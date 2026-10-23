@@ -1,5 +1,237 @@
 # Paid runner full-stack E2E
 
+## Dependable-work qualification checkpoint
+
+`dependable-qualification.ts` defines the six everyday journeys across Codie
+and Claude, through Paperclip and Slack: 24 cells. The checkpoint requires three
+fresh candidate passes per cell, followed by a staging pass for that cell. It
+compares the recorded source, start/end serving revisions, model, effective
+settings hash, production instructions hash, case definition, and runner artifact.
+Repeated tasks or runs cannot count as fresh attempts. Each journey requires
+its independent durable-state, output, rendered-conversation, and delivery checks.
+An agent's success prose cannot satisfy these checks.
+
+Set `PAPERCLIP_DEPENDABLE_QUALIFICATION_MANIFEST` to a private JSON file matching
+`DependableQualification` when generating the ordinary Product E2E report. It
+writes `dependable-qualification.json` beside the existing report and makes an
+incomplete checkpoint fail that report command. The checkpoint reads the entire
+retained attempt pool before best-attempt selection. Failed attempts and missing
+observer receipts remain visible after later successes. Duplicate receipts make
+the checkpoint incomplete while preserving report output. Qualification also
+requires every manifest-listed proof file to exist inside its attempt directory;
+missing files, symlinks, and unsafe paths cannot count as inspected evidence. The ordinary report's
+costs, timings, evidence scanning, and attempt records remain authoritative.
+
+The observer receipt is typed and validated as `RunnerE2EResult.dependableWork`;
+it contains no credentials or provider prose. `dependableDailyExecutions` returns
+four exact execution IDs per UTC day, rotating all cells in six days. It refuses
+to start the rotation until all 24 exact journeys exist in the catalog. The existing bounded operations
+manifest and shared journal must own spending and scheduling; this checkpoint
+does not start work, retry it, or create a second scheduler.
+
+The complete journey registrations and staging/Slack observers are still being
+implemented. Existing development cells do not emit qualifying observer receipts
+and do not count toward this checkpoint. A green support test is calibration of
+the checkpoint, not a live qualification result.
+
+## Automatic repository continuation
+
+The explicit-only `automatic-repository` suite is an early repair check for
+native Codex and Claude on local and Daytona execution. One browser request
+must stage its managed repository, continue without a timer or another user
+message, and deliver a registered download. The oracle compares downloaded
+JSON with the actual checkout and the original task file. The source admission
+creates an unpredictable reference and registers its bytes before setup. The
+observer must download that source-attributed artifact while only the first
+admission is running, before the successor starts. A missing original, late
+observation, or different successor-created reference fails qualification. The
+successor is instructed to stop on a missing file and never recreate it. Both admissions
+must retain one workspace and commit their native results. The successor must
+have its own dispatch receipt and saved native intent. It starts after the
+predecessor finishes; dispatch must not retag the predecessor. The fixture uses
+production hire instructions and records the selected catalog model. These four
+development cells do not qualify Slack, staging configurations, migration,
+finalization restart, or the complete dependable-work milestone.
+
+Select it explicitly with `--suite automatic-repository`. Every execution has
+one attempt, two expected provider admissions, and 1,000-cent company and agent
+hard stops. Automatic infrastructure retries are disabled. Existing campaign
+reports retain failures, timings, usage, runtime costs, and source identity.
+Source-server startup prepares the existing shared/plugin SDK build dependencies
+before importing native tool authority. Installed-package checks never execute
+checkout build helpers.
+
+## Configured repository and conversion checks
+
+The explicit-only `configured-repository` and `legacy-conversion` suites each
+have four development cells: Codex `gpt-6.1-sol` and Claude `claude-opus-5-5`,
+on local and Daytona environments. Each uses production hire instructions,
+one attempt, one expected provider admission, and 1,000-cent company and agent
+hard stops. The conversion journey creates a real legacy agent and selects
+Paperclip Runner through the public agent update API. It checks retained
+configuration, encrypted secret references, environment, instructions, and
+corresponding permission policy before submitting work through the browser.
+The disposable legacy profile starts without optional CLI-only extra arguments or turn limits;
+the journey does not remove settings from an existing user agent. For either
+provider, Daytona's public environment probe must save platform qualification
+before the same agent selects Runner. Probe leases and uncertain probe accounting
+remain included in attempt evidence and cleanup.
+
+The observer seeds a random reference in the fixture-owned Git checkout before
+task creation. It checks the downloaded JSON against the original file bytes,
+SHA-256 and commit, then checks the preserved source through the workspace API.
+A pass also requires the configured native provider/model, one committed run,
+a visible artifact link after reload, Done, and no pending question. No agent
+success claim or agent-authored test can replace these checks.
+
+The explicit-only `automatic-repository-configured-models` suite reuses the
+projectless continuation oracle above with those same two recorded staging
+models. Its four cells keep the first admission's artifact observation and the
+strict requirement for a saved same-agent continuation. A monitor fallback is
+still a failure of that requirement.
+
+These twelve development cells use API-key authentication and per-turn Runner
+lifecycle. They do not qualify staging subscription credentials, warm Runner
+reuse, Slack delivery, or the complete dependable-work matrix. Run one exact
+ID for a bounded check:
+
+```sh
+pnpm test:e2e:runner -- --id legacy-conversion.runner-codex.local.convert-and-deliver --max-automatic-retries 0
+pnpm test:e2e:runner -- --id automatic-repository-configured-models.runner-codex.local.automatic-repository-resume --max-automatic-retries 0
+```
+
+## Stop and task resumption
+
+The explicit-only `followup-stop-resume` suite has two local development cells
+using the configured Codex and Claude models and production hire instructions.
+It independently seeds a context file, verifies the first active checkpoint,
+sends one ordinary follow-up, presses Stop in the composer, and records an
+acknowledged cancelled run with no automatic path for at least five seconds.
+A later ordinary user message resumes the same task without restating the
+context or changed label. One successor must preserve workspace, instructions,
+and tool contract, and deliver an independently checked browser download.
+Missing an active boundary fails the attempt. These API-key development cells
+do not qualify staging subscription authentication, warm reuse, or Slack.
+
+```sh
+pnpm test:e2e:runner -- --list --suite followup-stop-resume
+pnpm test:e2e:runner -- --id followup-stop-resume.runner-codex.local.followup-stop-resume --max-automatic-retries 0
+```
+
+Before native selection, the observer verifies the existing task and context
+bindings while the native task ID is still unset. Every present task ID must
+agree. A checkpoint still requires the selected native run and its owned provider
+turn. The checkpoint poll treats invalid, duplicate, corrupt, or unauthorized
+evidence as a permanent attempt failure. An artifact that is not registered yet may wait.
+The final result opens its actual attachment chip and downloads through the file
+tab. The delivery observer separates server-receipted progress and generated file
+preparation from final replies. File preparation needs its exact applied receipt
+and independently read attachment-to-comment, task, and run binding. An ordinary
+extra reply still fails; matching wording alone cannot hide it.
+Both inner and outer failure captures use the same closed lifecycle fields.
+They do not put prompt, provider text, configuration, or logs into api-state.json.
+
+## Finalization recovery
+
+The explicit-only `finalization-recovery` suite has two development cells on
+Daytona: Codex `gpt-6.1-sol` and Claude `claude-opus-5-5`. It uses the production
+hire instructions and one provider admission. A 64 MiB random data file makes
+real workspace export observable; a small registered JSON proof records its
+original size, hash and reference before the interruption.
+
+The observer requires a saved native result and a running workspace-finalization
+operation. The isolated server wrapper rechecks that boundary through public
+APIs, then kills only its previously observed process tree without graceful
+shutdown. This includes the attempt's embedded database; no shared service or
+remote sandbox receives the process signal. Restart uses the same persisted
+instance. A crash outside the required phase or a missed interruption window
+fails; ordinary shutdown and completed work cannot substitute for this fault.
+
+A pass requires recovery of the interrupted workspace operation, the unchanged
+accepted-result digest and original artifact, independently hashed restored
+binary bytes, no additional provider turn or admission, and exactly one final
+reply matched to its delivery receipt and visible download. API reads and
+allowlisted lifecycle evidence stay in the existing report pipeline. The flow
+uses no private Runner hook or direct database write. These API-key/per-turn
+checks do not qualify deployed staging, warm reuse, or Slack delivery. One
+attempt has 1,000-cent company and agent hard stops; the binary is retained in
+the fixture workspace, not uploaded as a deliverable.
+
+```sh
+pnpm test:e2e:runner -- --list --suite finalization-recovery
+pnpm test:e2e:runner -- --id finalization-recovery.runner-codex.daytona.preserve-result-on-restart --max-automatic-retries 0
+```
+
+## Necessary free-text question
+
+The explicit-only `necessary-question` suite has four development cells: the
+recorded Codex and Claude models, on local and Daytona environments. It requests
+one essential booking reference that only the test user knows. The browser must
+show the actual free-text prompt and its explanation, then submit the real answer.
+The oracle checks the unchanged question, its server-owned provider or semantic
+receipt, the exact stored user answer, and one bound continuation. The saved
+confirmation must contain that answer exactly. The final reply's link must open
+that same task document and display its confirmation.
+A title, success claim, replacement card, duplicate wake, or uncommitted result
+cannot establish a pass.
+
+This extends the existing continuation flow and keeps the older question suites
+unchanged. It uses production hire instructions, one attempt, one or two provider
+admissions, and 1,000-cent company and agent budgets. API-key authentication and
+per-turn lifecycle remain explicit development differences. It does not qualify
+Slack, staging subscription credentials, warm reuse, or the complete checkpoint.
+
+```sh
+pnpm test:e2e:runner -- --list --suite necessary-question
+pnpm test:e2e:runner -- --id necessary-question.runner-codex.local.necessary-free-text --max-automatic-retries 0
+```
+
+## Latency observation bounds
+
+The explicit `codie-latency-diagnostic` arms its observation recorder before
+dispatching task creation and measures elapsed time with `performance.now()`.
+The first browser read starts before dispatch; subsequent reads run every 100 ms
+without overlapping. The observer stops and drains before fixture teardown,
+with one one-second deadline for its pending and final reads. On expiry, it
+records `observationTimeouts` and a failed observation for each waiting probe,
+starts no more reads, and ignores late completions. Fixture cleanup owns the
+browser operation that can still be running after that deadline.
+It retains `latencyProbes` in the existing result JSON and dashboard, separately
+for the first visible substantive response and final task/run settlement, with
+an inclusive 30-second target. Platform-generated receipts do not count as the
+substantive response. Browser polls bound persistent visible output; this does
+not measure Slack delivery or qualify transient output between observations.
+These timing verdicts are diagnostic dimensions and do not replace the existing
+workflow matchers or rewrite the original attempt grade.
+
+`latency-timing.ts` is shared by response and acknowledgement timing evidence.
+The browser adapter samples both from one snapshot when an acknowledgement
+target is explicitly configured; the Daytona diagnostic does not enable that
+feature or infer a missing Slack acknowledgement from its browser observations.
+An absent observation and a present observation give `(lastAbsent, firstPresent]`;
+an asynchronous absent read uses its start time, while a present read uses its
+completion time. Each bound is widened by the declared clock resolution.
+Targets specify `<` or `<=`; open and closed endpoints determine equality.
+Pass requires the entire interval to satisfy the target, fail requires the
+entire interval to violate it, and all other cases are inconclusive. Missing
+observations remain null; unknown resolution and invalid/empty intervals cannot
+produce a conclusive verdict. Failed reads are not absent observations.
+
+The historical acknowledgement `(1901, 2427] ms` is inconclusive against
+`<= 2000 ms`; the reply `(52965, 53334] ms` fails `<= 30000 ms`. These are
+deterministic calibration examples, not fresh live measurements. Provider
+message creation/edit timestamps remain separate metadata; an edit can expose
+new response text on an older message. Neither those timestamps nor final run
+settlement substitutes for first visible response. The legacy warm-turn
+`responseLatencyMs` field continues to mean final settlement and is labelled
+accordingly. Report regeneration recomputes interval verdicts, retains changed
+`recordedVerdict` values and all bounds, and leaves the original files intact.
+
+The explicit [deployment-targeted Product journeys](PRODUCT-JOURNEYS.md) reuse
+browser actions across managed self-hosted and Cloud targets. They include a
+model-free task-properties story, fresh Cloud onboarding, credential-free
+previews, private evidence, and prerequisite reuse; `--all` is unchanged.
+
 ## Live provider connection journeys
 
 See [PROVIDER-CONNECTIONS.md](PROVIDER-CONNECTIONS.md) for the explicit-only
@@ -822,8 +1054,31 @@ timings, token and cost accounting, and evidence links. The campaign header
 aggregates input, output, and cached tokens, provider-reported LLM spend,
 Daytona list-price runtime estimates, and pricing coverage. Missing provider
 usage is labeled `unavailable` or `unpriced`; it is never presented as zero
-cost. The CI report job stages the same portable site at
+cost. A known subtotal from a partially priced run stays in campaign spending,
+with a partial-amount label and incomplete billing coverage. The CI report job stages the same portable site at
 `normalized/index.html` inside the access-controlled merged report artifact.
+
+Campaign billing retains a separate numeric receipt for each attempt, including
+failed retries. The selected result still controls the grade and result card.
+Copies of the same attempt do not add another charge. The supervisor stamps a
+campaign/attempt identity; CI cells share `PAPERCLIP_E2E_ACCOUNTING_CAMPAIGN_ID`
+while retaining their separate artifact directories. Report regeneration keeps
+these receipts and their totals. A later cleanup update replaces an earlier
+observation of the same attempt; contradictory costs at the same timestamp are
+rejected instead of silently choosing one.
+
+The report shows missing attempt receipts and artifacts excluded from another
+campaign. Legacy CI evidence can be grouped by workflow run URL. Unscoped local
+artifacts cannot establish campaign membership, so only the selected result is
+used. Older normalized bundles without receipts are labeled `selected_results`;
+rendering them again cannot recover lost retry costs.
+
+Billing reads decimal `costUsdExact` receipts and separates model estimates
+from provider-reported amounts. Explicit zero usage differs from a missing or
+unfinished receipt. Coverage is limited to captured usage. It does not certify
+setup probes, subscription allocations, external tools, CI, storage, or provider
+invoice reconciliation. These require separate receipts. Do not use the current
+numeric report subtotals as an enforced spending limit.
 
 The trusted publisher discovers display-only entries for selected execution IDs
 absent from its local catalog, so branch-only suites remain visible in the
@@ -2429,9 +2684,9 @@ env -u DATABASE_URL -u DATABASE_MIGRATION_URL pnpm exec playwright test --config
 This covers record browsing, not agent execution. Use the cells below for the
 same-task agent workflow.
 
-The suite has three separately selectable local Codex cells. Receipt smoke has
-both an API-key profile and a subscription profile; the original arithmetic
-workflow remains subscription-only.
+The suite has four separately selectable local Codex cells. Receipt smoke and
+the reusable arithmetic workflow each have an API-key profile and a subscription
+profile. Each cell retains its own single-attempt bound.
 
 | Cell | Durable result | Work-run bounds |
 |---|---|---|
@@ -2501,3 +2756,188 @@ pnpm test:e2e:runner -- --id case-handoffs.runner-codex-subscription.local.same-
 
 The suite is excluded from `--all`. Its presence is not live qualification;
 inspect the packaged attempt evidence and normal Product E2E report.
+
+The `same-task-roundtrip` arithmetic cell now creates two reusable name-and-prompt
+workflows through production APIs and kicks off using `workflowId`. Its existing
+four-phase journey adopts A → B → A, then preserves A. Every phase reads the
+effective task document and persists its distinct procedure marker; the oracle
+requires the captured workflow identities and effective revision references.
+Case Work and expanded history show the names and arbitrary phases. This changes
+the definition/grader digest; historical passes do not qualify this extension.
+The receipt cells continue exercising inline kickoff compatibility. Provider-turn,
+timeout, credentials and cleanup bounds are unchanged.
+
+The arithmetic journey records four delivered agent handoffs and one completed
+terminal intent. The final case is `done` at handoff version 5, while the same
+four provider work runs and unchanged workflow document revision finish the task.
+The oracle rejects a missing or pending terminal intent.
+
+### Complaints and suggestions
+
+Each ordinary live attempt collects company-wide saved feedback after retiring
+runs and before fixture teardown, even when cancellation or grading fails. This
+includes feedback from child and background runs. Full paginated bodies and
+native tool invocation outcomes are checkpointed in the access-controlled
+`snapshots/agent-feedback.json` artifact. Collection has a 30-second deadline;
+missing detail pages, truncated run lists, active work, and unavailable APIs
+remain explicit partial/unavailable observations. Legacy shell helpers do not
+have complete native invocation coverage. An empty saved-feedback list does not
+prove that a tool was available, and a completed tool receipt does not by itself
+prove a saved submission.
+
+Results and retained-attempt receipts contain only counts, closed statuses, and
+body fingerprints. Campaign reports group identical fingerprints across attempts
+into distinct items awaiting review. Feedback presence does not change product
+grades. Inspect full bodies in private evidence and record a disposition before
+considering the review complete; collection itself performs no model call or
+semantic triage. Historical artifacts without feedback fields are labeled as
+uncaptured. A killed worker that never reaches finalization is also uncaptured,
+not evidence of zero feedback.
+
+Create a private review template from the merged `normalized-results.json`:
+
+```sh
+pnpm exec tsx tests/runner-e2e/feedback-dispositions.ts /private/report/normalized-results.json /private/feedback-review.json
+```
+
+Inspect the full bodies in the retained attempt snapshots. Set `reviewedAt` to
+an ISO timestamp with an explicit timezone, such as `2026-10-20T01:00:00Z`,
+and `reviewedBy` to `human` or `agent`. Timestamp comments and free-form dates
+are rejected so private notes cannot enter public report metadata. Assign each fingerprint
+one disposition: `actionable`, `duplicate`, `already_fixed`, `unsupported`, or
+`needs_investigation`. A duplicate must name a non-duplicate fingerprint in the
+same campaign via `duplicateOf`. Optional `issueNumber` links a public
+`paperclipai/paperclip` issue; keep private rationale outside this file.
+
+Import a completed review into an existing bundle without rerunning agents:
+
+```sh
+pnpm test:e2e:runner:dashboard -- /private/report --feedback-review /private/feedback-review.json
+```
+
+Alternatively, rebuild the same campaign and selection with
+`PAPERCLIP_E2E_FEEDBACK_REVIEW=/private/feedback-review.json`. Keep its original
+campaign ID. The importer requires exactly one decision per collected group
+and rejects a review if retained attempts or feedback coverage changed. Blank
+templates cannot count as reviewed. Dashboard regeneration and publication
+preserve the review. Regeneration refreshes the review status in an existing
+`summary.md` while preserving its other measurements and links. An empty review
+can record that no saved items were found; it never closes collection gaps,
+failed submissions, or changes product grades.
+This workflow makes no additional model call. Review performed by a separate
+paid model must be budgeted and recorded as `feedback_review` work separately.
+
+### Cost-ledger integration contract
+
+`cost-ledger.ts` provides the request-level journal used by the eval operations
+integration. It is a library; the existing launcher is not yet universally routed
+through it, and merely setting a campaign ID does not enforce a spending cap.
+Every paid dispatch must await a durable reservation before contacting a provider.
+The caller supplies an explicit campaign ceiling, deadline, request count, and
+concurrency. Monetary decisions use integer nanodollars. Model list prices remain
+estimates with a pinned version; they do not become provider invoices.
+
+The journal retains setup/agent/judge/tool/infrastructure attribution separately
+from heartbeat IDs. Multiple sources for the same request are retained but only
+one cost contributes to the total: reconciled, reported, estimated, then allocated.
+Missing receipts and cancellations retain their reservation. Contradictory final
+receipts stop new admissions. An observed overshoot is retained in full and stops
+further work; local estimated limits are not provider-enforced dollar limits.
+A request bound must account for input/context, output limits, cache-write pricing,
+and any paid tools before claiming a bounded overshoot.
+
+A single writer serializes admissions and fsyncs each journal record. Read-only
+inspection survives process loss; truncated/tampered records fail closed. A stale
+`.lock` requires inspection of the recorded owner PID before operator recovery;
+never remove a live writer's lock. Resuming a campaign cannot silently change its
+limits. The ledger rejects unreviewed fields and contains no prompts, responses,
+headers, or credentials. Cross-source request joins must use a verified request
+identity; ambiguous provider-request joins are rejected rather than double counted.
+
+### Opt-in Braintrust traces
+
+Set `PAPERCLIP_E2E_BRAINTRUST_PROJECT_ID` to the destination project UUID and
+provide `BRAINTRUST_API_KEY` securely to the launcher. An ambient key alone does
+not enable export. The launcher includes this key in secret scans and removes
+Braintrust variables from the server's inherited environment. Fixture setup
+saves the company's native observability configuration through the public,
+revision-fenced API using a non-Playwright sensitive request, before credential,
+agent, and setup-probe creation. The onboarding flow installs it immediately
+after company creation. The existing company setting controls native capture.
+
+Each ordinary `runner.spec.ts` attempt records orchestration spans for setup,
+execution, feedback, and cleanup, and exports protobuf over HTTPS with a ten
+second deadline and no redirect/retry. `snapshots/braintrust-trace.json` checkpoints
+the identifiers/configuration and final export receipt. Normalized results retain
+the receipt, including failed exports. Export failure does not rewrite the product
+verdict; operational qualification must separately require accepted and verified
+traces. A killed worker can leave a pending receipt, not a claimed successful export.
+
+`accepted` means the OTLP receiver accepted the batch; it does not establish that
+Braintrust indexed it or that native agent spans arrived. Search the project for
+`paperclip.eval.attempt_id` and its trace ID, then verify native records using the
+company ID and `paperclip.eval.run_ids`. The disposable company uses the custom
+OTLP destination at `https://api.braintrust.dev/otel` with a private `x-bt-parent`
+header containing the exported attempt parent. Braintrust attaches independent
+native trace roots beneath that attempt; native children keep their own hierarchy.
+This uses the existing company observability API without changing production
+trace parentage or enabling export on other companies.
+
+The parent encoder uses Braintrust's V4 project-log wire format with JSON identity
+fields (version 4, project-log type 2, zero compressed fields). Its fixture was
+round-tripped through the public `SpanComponentsV4.fromStr` export in
+`braintrust/util` 3.38.0. The implementation is specified in the
+[official SDK source](https://github.com/braintrustdata/braintrust-sdk-javascript/blob/403ae94fb3f1916a101d8d84de4c4871e4ae3bec/js/util/span_identifier_v4.ts).
+A model-free live probe verified the indexed child's `root_span_id` and
+`span_parents` in Braintrust; a native-agent run must separately qualify the path.
+The parent contains identifiers only and is installed through the sensitive
+credential-header path, outside browser evidence.
+
+Attempt spans include suite ID and definition hash, profile, case, configured
+provider/model, source revision (or explicit `unknown`), and the runner-spec grader
+path. The source revision identifies that grader's implementation. Worker exports
+are marked `paperclip.eval.outcome_stage=worker`. After evidence packaging,
+gateway shutdown and outer cleanup, the supervisor updates the same attempt root
+with its final outcome and adds a finalization span. This preserves failures first
+discovered after the worker returned. The result retains a separate finalization
+export receipt; old or killed attempts can explicitly lack one. Export failure
+remains separate from the product grade. Orchestration spans omit model usage and
+cost metrics. Gateway model logging remains a separate observation lane;
+its model costs must not be added to native costs without a verified request join.
+The separate provider connection suite and standalone judges do not yet use this
+attempt exporter.
+
+### Bounded local gateway pilot
+
+[OPERATIONS.md](./OPERATIONS.md) documents the opt-in operations manifest, exact
+selection admission, durable request reservations, local Responses/Messages proxy,
+and Braintrust routing. Current support is deliberately limited to local core
+Codex/Claude cells. The document distinguishes implemented accounting controls
+from live qualification and lists remaining billing/reporting coverage gaps.
+
+## Feedback persistence (explicit only)
+
+`--suite feedback-persistence` selects two local native Claude/Codex cells.
+Each creates one standard task through the browser, asks for two distinct
+synthetic feedback items, and requires the real `submit_complaint` and
+`submit_suggestion` tools. The five-minute case expects one task work run and
+disables automatic retries. Company and agent accounted-work budgets are $10.
+Setup probes and any background work must also pass through the separately
+budgeted gateway when using an operations manifest. Local compute is unmetered.
+Cost and duration forecasts remain unmeasured until a retained live attempt.
+The runner E2E maintainers own this manual case; `--all` excludes it.
+
+After collection and fixture teardown, the oracle reads the retained evidence
+file and requires exact nonce-bearing bodies, the original company/agent/task
+and observed run, plus one completed native receipt for each tool. Missing or
+partial collection, prose-only claims, foreign attribution, duplicate records,
+and failed submissions cannot pass. Full bodies stay in private evidence;
+public reports retain counts, fingerprints, and closed oracle checks. The usual
+result screenshot, trace, secret scanning and supervisor cleanup still apply.
+This case proves explicit submission and persistence, not spontaneous feedback
+quality or survival after an abrupt worker kill.
+
+```sh
+pnpm test:e2e:runner -- --list --suite feedback-persistence
+pnpm test:e2e:runner -- --id feedback-persistence.runner-acpx-claude.local.complaint-and-suggestion --max-automatic-retries 0 --max-parallel 1
+```

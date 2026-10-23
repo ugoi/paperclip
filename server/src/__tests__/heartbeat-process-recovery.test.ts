@@ -1,5 +1,6 @@
 import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
 import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
+import { createSystemRecovery } from "../services/system-recovery-state.js";
 import * as conversationContinuation from "../services/conversation-continuation.js";
 import { classifyEnvironmentCapabilities, environmentRuntimeService } from "../services/environment-runtime.js";
 import * as workspaceRuntime from "../services/workspace-runtime.js";
@@ -2641,6 +2642,32 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, hold.id)))[0])
       .toMatchObject({ status: "resolved", resolutionNote: "source_terminal" });
     await heartbeat.drainActiveRunExecutions();
+  });
+
+  it("resolves stale recovery on terminal tasks unless system recovery is still in flight", async () => {
+    const f = await seedRunFixture({ runStatus: "failed" });
+    const seedTerminalAction = async (action: Partial<typeof issueRecoveryActions.$inferInsert>) => {
+      const [issue] = await db.insert(issues).values({ companyId: f.companyId, title: "Closed recovery source",
+        status: "done", completedAt: new Date(), assigneeAgentId: f.agentId }).returning();
+      const [row] = await db.insert(issueRecoveryActions).values({ companyId: f.companyId, sourceIssueId: issue.id,
+        kind: "active_run_watchdog", status: "active", ownerType: "agent", ownerAgentId: f.agentId,
+        cause: "native_finalization_error", fingerprint: randomUUID(), evidence: { runId: f.runId },
+        nextAction: "Resume the native run.", ...action }).returning();
+      return row;
+    };
+    const agentNative = await seedTerminalAction({ wakePolicy: { kind: "resume_native_run", runId: f.runId } });
+    const systemEscalated = await seedTerminalAction({ status: "escalated", ownerType: "system", ownerAgentId: null });
+    const systemInFlight = await seedTerminalAction({ ownerType: "system", ownerAgentId: null,
+      evidence: { runId: f.runId, systemRecovery: createSystemRecovery(f.runId) } });
+
+    await heartbeatService(db).reconcileStrandedAssignedIssues();
+
+    for (const action of [agentNative, systemEscalated]) {
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0])
+        .toMatchObject({ status: "resolved", outcome: "restored", resolutionNote: "source_terminal" });
+    }
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, systemInFlight.id)))[0])
+      .toMatchObject({ status: "active", resolvedAt: null });
   });
 
   it.each(["settled", "rejected", "late_callback", "provider_transport_failed"] as const)(
@@ -8297,19 +8324,28 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       const lease = originalWatch(...args);
       return { ...lease, stop() { stopped(); lease.stop(); } };
     });
-    const originalUpdate = db.update.bind(db);
+    const originalTransaction = db.transaction.bind(db);
     const cleanupFailure = vi.fn(() => { throw new Error("fixture_deadline_cleanup_failure"); });
-    const update = vi.spyOn(db, "update").mockImplementation(((table: typeof heartbeatRuns) => {
-      const builder = originalUpdate(table);
-      const originalSet = builder.set.bind(builder);
-      builder.set = ((values: Record<string, unknown>) => {
-        if (table === heartbeatRuns && Object.keys(values).length === 1 && values.executionControlDeadlineAt === null) {
-          return { where: async () => cleanupFailure() };
+    const transaction = vi.spyOn(db, "transaction").mockImplementation((operation, config) =>
+      originalTransaction(async tx => {
+        const originalUpdate = tx.update.bind(tx);
+        const update = vi.spyOn(tx, "update").mockImplementation(((table: typeof heartbeatRuns) => {
+          const builder = originalUpdate(table);
+          const originalSet = builder.set.bind(builder);
+          builder.set = ((values: Record<string, unknown>) => {
+            if (table === heartbeatRuns && Object.keys(values).length === 1 && values.executionControlDeadlineAt === null) {
+              return { where: async () => cleanupFailure() };
+            }
+            return originalSet(values);
+          }) as typeof builder.set;
+          return builder;
+        }) as typeof tx.update);
+        try {
+          return await operation(tx);
+        } finally {
+          update.mockRestore();
         }
-        return originalSet(values);
-      }) as typeof builder.set;
-      return builder;
-    }) as typeof db.update);
+      }, config));
     const heartbeat = heartbeatService(db);
     try {
       await heartbeat.resumeQueuedRuns();
@@ -8319,7 +8355,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(adapterExecutionControls.has(runId)).toBe(false);
       expect((await heartbeat.getRun(runId))?.status).not.toBe("running");
     } finally {
-      update.mockRestore();
+      transaction.mockRestore();
       watcher.mockRestore();
     }
   });

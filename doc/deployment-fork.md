@@ -78,3 +78,22 @@ backups and worker artifact pins. Drain active runs, preserve the database and
 configuration, then deploy matching Core/worker artifacts. Check health, native
 task completion, continuation and cancellation on every changed platform. Keep
 the prior image, database backup and adapter configuration available for rollback.
+
+## Upstream snapshot integration: 2026-10-23
+
+The maintenance update merges upstream master at
+`75fcb0b3fca427774cff8f4f7ed43de9ab7f626b`. It retains the downstream process
+identity, cleanup, remote launch readiness, preconfigured SSH home, trusted-host
+Codex, and nested status-filter fixes. The upstream optional working-directory
+path and plugin execution paths keep their separate authority checks.
+
+Upstream and this fork independently assigned Copilot profile versions 53–55.
+The upstream historical fixtures keep their canonical filenames. The historical
+fork fixtures are preserved with `-stefan-identity.json` names, and their existing
+regression assertions remain. The merged implementation has a new profile 59
+identity; neither historical digest is reused to authorize the new source.
+
+This is a full Core and runner update. The UI-only image recipe is not suitable
+for it. Build both Linux and Darwin runners from the same final source, verify
+their embedded metadata and package/vendor copies, then stage a separate
+coordinated deployment. Source integration is not production acceptance.
