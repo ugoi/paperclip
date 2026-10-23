@@ -3,6 +3,7 @@ on:
   push:
     branches: [fix/nested-filter-release-20261023]
   workflow_dispatch:
+  workflow_call:
 permissions: {}
 concurrency:
   group: stefan-ui-update-${{ github.ref }}
@@ -26,7 +27,7 @@ jobs:
           base = 'ccce203d55fe35a728ee139b2e513f66cc176323'
           subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
           changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
-          packaging = {'Dockerfile.ui-update', 'Dockerfile.ui-update.dockerignore', '.github/workflows/stefan-ui-update.yml', 'doc/deployment-fork.md', 'doc/PRODUCT.md'}
+          packaging = {'Dockerfile.ui-update', 'Dockerfile.ui-update.dockerignore', '.github/workflows/stefan-ui-update.yml', '.github/workflows/stefan-production.yml', 'doc/deployment-fork.md', 'doc/PRODUCT.md'}
           unexpected = [p for p in changed if not p.startswith('ui/src/') and p not in packaging]
           if unexpected:
               raise SystemExit('UI-only build cannot publish changes to: ' + ', '.join(unexpected))
