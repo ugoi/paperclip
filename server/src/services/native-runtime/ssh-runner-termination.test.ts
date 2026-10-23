@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, environmentLeases, heartbeatRuns,
+import { agents, companies, createDb, environmentLeases, environments, heartbeatRuns,
   getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
 import { agentExecutionsHaveStopped } from "../agent-execution-stop.js";
 import { hasRemoteTerminationReceipt } from "../remote-execution-termination.js";
 import { environmentService } from "../environments.js";
+import { environmentRuntimeService } from "../environment-runtime.js";
 import { recordSshRunnerTermination, type SshRunnerStopAuthority } from "./ssh-runner-termination.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -25,7 +26,7 @@ suite("SSH Runner termination receipt", () => {
   async function seed() {
     const companyId = randomUUID(), agentId = randomUUID(), runId = randomUUID();
     const runnerInstanceId = randomUUID(), normalizedSessionId = randomUUID();
-    const environmentLeaseId = randomUUID();
+    const environmentLeaseId = randomUUID(), environmentId = randomUUID();
     const providerLeaseId = "ssh://test@shared.invalid:22/shared";
     const ssh = { host: "shared.invalid", username: "test", port: 22, remoteWorkspacePath: "/shared" };
     await db.insert(companies).values({ id: companyId, name: "SSH stop fixture", issuePrefix: `T${companyId.replaceAll("-", "").slice(0, 8).toUpperCase()}` });
@@ -34,14 +35,15 @@ suite("SSH Runner termination receipt", () => {
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "cancelled",
       runtimeMode: "native", runnerInstanceId, nativeSessionId: normalizedSessionId,
       startedAt: new Date(), finishedAt: new Date() });
-    await db.insert(environmentLeases).values({ id: environmentLeaseId, companyId,
+    await db.insert(environments).values({ id: environmentId, name: `SSH test ${environmentId}`, driver: "ssh", config: ssh });
+    await db.insert(environmentLeases).values({ id: environmentLeaseId, environmentId, companyId,
       heartbeatRunId: runId, provider: "ssh", providerLeaseId, status: "active",
       metadata: { retainedFixture: true, ...ssh, remoteCwd: "/shared" } });
     const authority: SshRunnerStopAuthority = { companyId, agentId, runId, runnerInstanceId,
       normalizedSessionId, environmentLeaseId, ssh };
     const read = async () => (await db.select().from(environmentLeases)
       .where(eq(environmentLeases.id, environmentLeaseId)))[0]!;
-    return { authority, agentId, read };
+    return { authority, agentId, read, environment: (await environmentService(db).getById(environmentId))! };
   }
 
   it("keeps cancelled SSH work blocked until exact confirmed close reaches the lease", async () => {
@@ -60,6 +62,40 @@ suite("SSH Runner termination receipt", () => {
     // A later lease release invalidates the old stop, as before this patch.
     await environmentService(db).releaseLease(authority.environmentLeaseId);
     expect(hasRemoteTerminationReceipt(await read())).toBe(false);
+  });
+
+  it("preserves confirmed close through ordinary and stale-snapshot SSH finalization", async () => {
+    const { authority, agentId, read, environment } = await seed();
+    const runtime = environmentRuntimeService(db);
+    // releaseRunLeases selected this active row before close completed.
+    const selectedBeforeClose = (await environmentService(db).getLeaseById(authority.environmentLeaseId))!;
+    expect(await recordSshRunnerTermination(db, authority)).toBe(true);
+    const confirmed = await read();
+    // The normal later heartbeat-finally path sees no active lease.
+    expect(await runtime.releaseRunLeases(authority.runId, "expired")).toEqual([]);
+    expect(await read()).toEqual(confirmed);
+    // An already in-flight finalizer reaches the real SSH driver after close.
+    await runtime.getDriver("ssh")!.releaseRunLease({ environment,
+      lease: selectedBeforeClose, status: "expired" });
+    expect(await read()).toEqual(confirmed);
+    expect(await agentExecutionsHaveStopped(db, [agentId])).toBe(true);
+  });
+
+  it("does not preserve a stale receipt after lease reactivation or release a different owner", async () => {
+    const { authority, read, environment } = await seed();
+    const driver = environmentRuntimeService(db).getDriver("ssh")!;
+    const selected = (await environmentService(db).getLeaseById(authority.environmentLeaseId))!;
+    const before = await read();
+    expect(await driver.releaseRunLease({ environment,
+      lease: { ...selected, heartbeatRunId: randomUUID() }, status: "expired" })).toBeNull();
+    expect(await read()).toEqual(before);
+    expect(await recordSshRunnerTermination(db, authority)).toBe(true);
+    // Even if an old metadata receipt remains, active ownership invalidates it.
+    await db.update(environmentLeases).set({ status: "active", releasedAt: null, cleanupStatus: null })
+      .where(eq(environmentLeases.id, authority.environmentLeaseId));
+    await driver.releaseRunLease({ environment, lease: selected, status: "expired" });
+    expect(hasRemoteTerminationReceipt(await read())).toBe(false);
+    expect((await read()).metadata?.remoteExecutionTermination).toBeUndefined();
   });
 
   it.each(["companyId", "agentId", "runId", "runnerInstanceId", "normalizedSessionId", "environmentLeaseId"] as const)(
