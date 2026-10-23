@@ -12,6 +12,8 @@ COPY packages/paperclip-runner/README.md packages/paperclip-runner/
 COPY packages/paperclip-runner/runner/crates/runner-core/tests/support/codex_assigned_tool_validation.rs packages/paperclip-runner/runner/crates/runner-core/tests/support/
 COPY packages/paperclip-runner/runner/crates/runner-core/tests/stdio_mcp.rs packages/paperclip-runner/runner/crates/runner-core/tests/
 COPY packages/paperclip-runner/scripts/provision-pi-package.test.mjs packages/paperclip-runner/scripts/
+COPY packages/paperclip-runner/test-support/local-integrity-boundary-golden.ts packages/paperclip-runner/test-support/
+COPY packages/paperclip-runner/protocol/fixtures/provider-boundary/local-integrity.json packages/paperclip-runner/protocol/fixtures/provider-boundary/
 RUN pnpm --filter @paperclipai/ui typecheck && pnpm check:token-gates
 ARG PAPERCLIP_UI_BUILD_COMMIT
 RUN test -n "$PAPERCLIP_UI_BUILD_COMMIT" \
