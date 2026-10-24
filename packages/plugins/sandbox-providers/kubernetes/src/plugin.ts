@@ -454,6 +454,10 @@ const plugin = definePlugin({
       secretName,
       phase: "Pending",
       backend: config.backend,
+      // The pod already owns this emptyDir. Setup probes may sync runtime
+      // assets using the acquired lease before realized metadata is persisted.
+      // Seed the concrete confinement root rather than weakening sync checks.
+      remoteCwd: "/workspace",
       scopedNetworkPolicyName,
       scopedNetworkEgress,
       // Native file sync streams over a pod exec; only the sandbox-cr backend

@@ -9,6 +9,10 @@ vi.mock("../../src/kube-client.js", () => ({
   makeKubeClients: vi.fn(() => h.clients),
 }));
 
+vi.mock("../../src/tenant-orchestrator.js", () => ({
+  ensureTenant: vi.fn().mockResolvedValue(undefined),
+}));
+
 import plugin from "../../src/plugin.js";
 
 const CONFIG = { inCluster: true, backend: "sandbox-cr" };
@@ -41,6 +45,32 @@ function readySandboxCr(podName: string): Record<string, unknown> {
 
 beforeEach(() => {
   h.clients = {};
+});
+
+describe("fresh sandbox setup sync", () => {
+  it("can sync an acquired lease before realization metadata is persisted, while retaining confinement", async () => {
+    h.clients = {
+      custom: {
+        createNamespacedCustomObject: vi.fn().mockResolvedValue({ metadata: { uid: "uid-setup" } }),
+        getNamespacedCustomObject: vi.fn().mockResolvedValue(readySandboxCr("setup-pod")),
+      },
+      core: { createNamespacedSecret: vi.fn().mockResolvedValue({}) },
+    };
+    const lease = await plugin.definition.onEnvironmentAcquireLease!({
+      driverKey: "kubernetes", companyId: "acme", environmentId: "env-1",
+      runId: "setup-run", config: CONFIG,
+    });
+    const params = {
+      driverKey: "kubernetes", companyId: "acme", environmentId: "env-1",
+      config: CONFIG, lease,
+    };
+    await expect(plugin.definition.onEnvironmentSyncIn!({ ...params, operations: [] }))
+      .resolves.toEqual(expect.objectContaining({ operations: [] }));
+    await expect(plugin.definition.onEnvironmentSyncIn!({
+      ...params,
+      operations: [{ key: "escape", files: [{ kind: "file", sourcePath: "/unused", targetPath: "/etc/escape" }] }],
+    })).rejects.toThrow(/escapes the workspace remote dir/);
+  });
 });
 
 describe("onEnvironmentResumeLease", () => {
