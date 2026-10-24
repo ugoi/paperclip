@@ -11,6 +11,7 @@ import type {
   PluginEnvironmentRealizeWorkspaceParams,
   PluginEnvironmentRealizeWorkspaceResult,
   PluginEnvironmentReleaseLeaseParams,
+  PluginEnvironmentTerminationReceipt,
   PluginEnvironmentResumeLeaseParams,
   PluginEnvironmentSyncInParams,
   PluginEnvironmentSyncOutParams,
@@ -38,7 +39,7 @@ import {
 } from "./sandbox-cr-orchestrator.js";
 import { execInPod, execInPodStreaming, wrapCommandWithEnv } from "./pod-exec.js";
 import { performSyncIn, performSyncOut, type PodStreamExec } from "./file-sync.js";
-import { checkLeaseResumable, destroyLeaseResources } from "./lease-lifecycle.js";
+import { checkLeaseResumable, destroyLeaseResources, waitForLeaseDeletion } from "./lease-lifecycle.js";
 import {
   appendNetworkEgressDenyHint,
   createScopedNetworkEgressPolicyOrReleaseWorkload,
@@ -575,7 +576,7 @@ const plugin = definePlugin({
 
   async onEnvironmentReleaseLease(
     params: PluginEnvironmentReleaseLeaseParams,
-  ): Promise<void> {
+  ): Promise<PluginEnvironmentTerminationReceipt | void> {
     if (!params.providerLeaseId) return;
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace =
@@ -610,11 +611,18 @@ const plugin = definePlugin({
         ?? (err as { code?: number; statusCode?: number }).statusCode;
       if (code !== 404) throw err;
     }
+    await waitForLeaseDeletion(clients, {
+      namespace, name: params.providerLeaseId, backend: leaseBackend,
+      podName: typeof params.leaseMetadata?.podName === "string" ? params.leaseMetadata.podName : null,
+      secretName: typeof params.leaseMetadata?.secretName === "string"
+        ? params.leaseMetadata.secretName : `${params.providerLeaseId}-env`,
+    });
+    return { providerLeaseId: params.providerLeaseId, state: "destroyed" };
   },
 
   async onEnvironmentDestroyLease(
     params: PluginEnvironmentDestroyLeaseParams,
-  ): Promise<void> {
+  ): Promise<PluginEnvironmentTerminationReceipt | void> {
     if (!params.providerLeaseId) return;
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace =
@@ -655,6 +663,10 @@ const plugin = definePlugin({
       podName,
       secretName,
     });
+    await waitForLeaseDeletion(clients, {
+      namespace, name: params.providerLeaseId, backend: leaseBackend, podName, secretName,
+    });
+    return { providerLeaseId: params.providerLeaseId, state: "destroyed" };
   },
 
   async onEnvironmentExecute(

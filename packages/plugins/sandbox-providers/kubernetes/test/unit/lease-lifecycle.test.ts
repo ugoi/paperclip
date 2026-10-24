@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   checkLeaseResumable,
   destroyLeaseResources,
+  waitForLeaseDeletion,
   isKubeNotFoundError,
 } from "../../src/lease-lifecycle.js";
 
@@ -344,5 +345,38 @@ describe("destroyLeaseResources", () => {
         secretName: null,
       }),
     ).rejects.toThrow("forbidden");
+  });
+});
+
+
+describe("confirmed lease deletion", () => {
+  const input = { namespace: "ns", name: "pc-one", backend: "sandbox-cr" as const, podName: "pod-one", secretName: "pc-one-env" };
+  function clients() {
+    return { custom: { getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }), readNamespacedSecret: vi.fn().mockRejectedValue(notFound()) } };
+  }
+  it("waits for terminating owned pods after the controller is gone, ignoring another lease", async () => {
+    const api = clients();
+    api.core.listNamespacedPod.mockResolvedValueOnce({ items: [{ metadata: { name: "pod-one", deletionTimestamp: "now" } }] })
+      .mockResolvedValue({ items: [{ metadata: { name: "pod-other", ownerReferences: [{ kind: "Sandbox", name: "pc-other" }] } }] });
+    await waitForLeaseDeletion(api as never, input, { pollMs: 1 });
+    expect(api.core.listNamespacedPod).toHaveBeenCalledTimes(2);
+  });
+  it("does not certify an orphan with an unknown pod name but a matching owner", async () => {
+    const api = clients();
+    api.core.listNamespacedPod.mockResolvedValue({ items: [{ metadata: { name: "unexpected-name", ownerReferences: [{ kind: "Sandbox", name: "pc-one" }] } }] });
+    await expect(waitForLeaseDeletion(api as never, { ...input, podName: null }, { timeoutMs: 0 })).rejects.toThrow(/not confirmed/);
+  });
+  it("does not certify a controller that still exists", async () => {
+    const api = clients(); api.custom.getNamespacedCustomObject.mockResolvedValue({ metadata: { deletionTimestamp: "now" } });
+    await expect(waitForLeaseDeletion(api as never, input, { timeoutMs: 0 })).rejects.toThrow(/not confirmed/);
+  });
+  it("preserves permission and transport failures instead of treating them as absence", async () => {
+    const api = clients(); api.core.listNamespacedPod.mockRejectedValue(Object.assign(new Error("denied"), { code: 403 }));
+    await expect(waitForLeaseDeletion(api as never, input)).rejects.toThrow("denied");
+  });
+  it("waits for credential cleanup", async () => {
+    const api = clients(); api.core.readNamespacedSecret.mockResolvedValue({});
+    await expect(waitForLeaseDeletion(api as never, input, { timeoutMs: 0 })).rejects.toThrow(/not confirmed/);
   });
 });

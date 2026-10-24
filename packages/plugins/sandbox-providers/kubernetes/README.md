@@ -185,3 +185,12 @@ their initial file-sync root. This lets setup probes stage runtime assets
 before workspace-realization metadata is persisted. Realized workspace
 metadata can still select a more specific root. Missing roots and paths
 outside the selected root continue to fail closed.
+
+## Confirmed termination
+
+Release and destroy return a provider termination receipt only after the exact
+Sandbox/Job, its known or owner-referenced pods, and its per-run Secret disappear.
+An accepted DELETE or a deletion timestamp is insufficient. Verification is a
+bounded 45-second wait during cleanup; authorization errors and timeouts fail
+closed. This lets Paperclip safely finish cancellation and resume an agent.
+The provider needs pod list access, and destroy also requires pod delete access.

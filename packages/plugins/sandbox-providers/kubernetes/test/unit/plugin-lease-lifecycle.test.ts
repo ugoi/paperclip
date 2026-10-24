@@ -191,14 +191,41 @@ describe("onEnvironmentResumeLease", () => {
   });
 });
 
+describe("onEnvironmentReleaseLease", () => {
+  it("returns stop evidence only after controller, owned pods and credentials are absent", async () => {
+    h.clients = {
+      custom: { deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+        getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
+        readNamespacedSecret: vi.fn().mockRejectedValue(notFound()) },
+    };
+    await expect(plugin.definition.onEnvironmentReleaseLease!({
+      driverKey: "kubernetes", companyId: "acme", environmentId: "env-1",
+      config: CONFIG, providerLeaseId: "pc-abc", leaseMetadata: leaseMetadata(),
+    })).resolves.toEqual({ providerLeaseId: "pc-abc", state: "destroyed" });
+  });
+
+  it("does not attest termination when pod verification is forbidden", async () => {
+    h.clients = {
+      custom: { deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+        getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: { listNamespacedPod: vi.fn().mockRejectedValue(new Error("Forbidden")) },
+    };
+    await expect(plugin.definition.onEnvironmentReleaseLease!({
+      driverKey: "kubernetes", companyId: "acme", environmentId: "env-1",
+      config: CONFIG, providerLeaseId: "pc-abc", leaseMetadata: leaseMetadata(),
+    })).rejects.toThrow("Forbidden");
+  });
+});
+
 describe("onEnvironmentDestroyLease", () => {
   it("deletes the Sandbox CR, pod, and per-run Secret", async () => {
     const deleteCr = vi.fn().mockResolvedValue({});
     const deletePod = vi.fn().mockResolvedValue({});
     const deleteSecret = vi.fn().mockResolvedValue({});
     h.clients = {
-      custom: { deleteNamespacedCustomObject: deleteCr },
-      core: { deleteNamespacedPod: deletePod, deleteNamespacedSecret: deleteSecret },
+      custom: { deleteNamespacedCustomObject: deleteCr, getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }), readNamespacedSecret: vi.fn().mockRejectedValue(notFound()), deleteNamespacedPod: deletePod, deleteNamespacedSecret: deleteSecret },
       batch: { deleteNamespacedJob: vi.fn() },
     };
 
@@ -226,8 +253,8 @@ describe("onEnvironmentDestroyLease", () => {
 
   it("is idempotent: resolves cleanly when every resource is already gone (404)", async () => {
     h.clients = {
-      custom: { deleteNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
-      core: {
+      custom: { deleteNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()), getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }), readNamespacedSecret: vi.fn().mockRejectedValue(notFound()),
         deleteNamespacedPod: vi.fn().mockRejectedValue(notFound()),
         deleteNamespacedSecret: vi.fn().mockRejectedValue(notFound()),
       },
@@ -243,14 +270,14 @@ describe("onEnvironmentDestroyLease", () => {
         providerLeaseId: "pc-abc",
         leaseMetadata: leaseMetadata(),
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ providerLeaseId: "pc-abc", state: "destroyed" });
   });
 
   it("is a no-op when providerLeaseId is null", async () => {
     const deleteCr = vi.fn();
     h.clients = {
-      custom: { deleteNamespacedCustomObject: deleteCr },
-      core: { deleteNamespacedPod: vi.fn(), deleteNamespacedSecret: vi.fn() },
+      custom: { deleteNamespacedCustomObject: deleteCr, getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }), readNamespacedSecret: vi.fn().mockRejectedValue(notFound()), deleteNamespacedPod: vi.fn(), deleteNamespacedSecret: vi.fn() },
       batch: { deleteNamespacedJob: vi.fn() },
     };
 
@@ -270,12 +297,12 @@ describe("onEnvironmentDestroyLease", () => {
     const deleteJob = vi.fn().mockResolvedValue({});
     const deleteCr = vi.fn();
     h.clients = {
-      custom: { deleteNamespacedCustomObject: deleteCr },
-      core: {
+      custom: { deleteNamespacedCustomObject: deleteCr, getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }), readNamespacedSecret: vi.fn().mockRejectedValue(notFound()),
         deleteNamespacedPod: vi.fn().mockResolvedValue({}),
         deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
       },
-      batch: { deleteNamespacedJob: deleteJob },
+      batch: { deleteNamespacedJob: deleteJob, readNamespacedJob: vi.fn().mockRejectedValue(notFound()) },
     };
 
     await plugin.definition.onEnvironmentDestroyLease!({
