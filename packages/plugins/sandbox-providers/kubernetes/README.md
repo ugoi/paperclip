@@ -178,3 +178,10 @@ To run the kind-cluster integration test (requires `kubectl --context kind-paper
 ```bash
 RUN_K8S_INTEGRATION_TESTS=1 pnpm test test/integration/end-to-end-run.test.ts
 ```
+## Fresh sandbox workspace
+
+Acquired leases record `/workspace`, the pod's existing emptyDir mount, as
+their initial file-sync root. This lets setup probes stage runtime assets
+before workspace-realization metadata is persisted. Realized workspace
+metadata can still select a more specific root. Missing roots and paths
+outside the selected root continue to fail closed.
