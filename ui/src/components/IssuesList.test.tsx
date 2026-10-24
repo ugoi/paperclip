@@ -2062,6 +2062,45 @@ describe("IssuesList", () => {
     });
   });
 
+  it.each([[true, true], [true, false], [false, true], [false, false]])("respects selected statuses in nested task context (streamlined=%s, children fetched=%s)", async (streamlined, fetchChildren) => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: streamlined });
+    localStorage.setItem("paperclip:test-issues:company-1", JSON.stringify({
+      statuses: ["in_progress", "todo", "in_review"], nestingEnabled: true, showAgentCreatedTasks: false,
+    }));
+    const parent = createIssue({
+      id: "human-parent", title: "Active parent", status: "in_progress", createdByUserId: "person",
+    });
+    const pending = createIssue({
+      id: "pending-child", title: "Pending child", parentId: parent.id, status: "todo", createdByAgentId: "agent",
+    });
+    const completed = createIssue({
+      id: "completed-child", title: "Completed child", parentId: parent.id, status: "done", createdByAgentId: "agent",
+    });
+    mockIssuesApi.list.mockImplementation(async (_companyId, filters) => filters?.parentId === parent.id ? [pending, completed] : []);
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={fetchChildren ? [parent] : [parent, pending, completed]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-issues"
+        enableAgentCreatedVisibilityFilter
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
+
+    try {
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain("Active parent");
+        expect(container.textContent).toContain("Pending child");
+        expect(container.textContent).not.toContain("Completed child");
+        expect(container.querySelector('button[title="Disable parent-child nesting"]')).not.toBeNull();
+      });
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it.each([true, false])("keeps visibility controls and fetching preferences synchronized (streamlined=%s)", async (streamlined) => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: streamlined });
     function PreferenceProbe() {

@@ -1,3 +1,4 @@
+import { notifyExecutionRunWork } from "./execution-control-notifications.js";
 import { canSelectFreshWorkspace, type ContinuationReadiness } from "./fresh-workspace-continuation.js";
 import { readTaskRetryIntent } from "./task-retry.js";
 import { readSystemRecovery } from "./system-recovery-state.js";
@@ -193,8 +194,19 @@ export async function admitExplicitNativeContinuation(input: {
     const unusedAdmission = run.status === "cancelled" && !run.startedAt &&
       run.errorCode === "execution_reconciliation_required" &&
       !run.processPid && !run.processGroupId && !run.nativeSessionId;
+    // Several retained holds may describe this same failed execution. Reuse
+    // its current explicit Retry strategy for a historical hold that predates
+    // system recovery. Every hold still passes the stop/effect checks below.
+    const sourceRunId = run.id;
+    const strategyEvidence = input.taskRetryRequestId && !Object.hasOwn(action.evidence, "systemRecovery")
+      ? actions.find(candidate => {
+          const recovery = readSystemRecovery(candidate.evidence);
+          return candidate.evidence.runId === sourceRunId && recovery?.sourceRunId === sourceRunId &&
+            recovery.intentId === input.taskRetryRequestId;
+        })?.evidence ?? action.evidence
+      : action.evidence;
     const freshIntent = await canSelectFreshWorkspace({ db, companyId, issueId, agentId, actorId,
-      sourceRunId: run.id, evidence: action.evidence, taskRetryRequestId: input.taskRetryRequestId,
+      sourceRunId: run.id, evidence: strategyEvidence, taskRetryRequestId: input.taskRetryRequestId,
       queuedRequestId: input.queuedCommentRequestId });
     const legacyUserTurn = run.runtimeMode === "legacy" &&
       action.cause === "legacy_execution_requires_reconciliation" &&
@@ -356,16 +368,19 @@ export async function admitExplicitNativeContinuation(input: {
     ...(queuedInterrupt ? { queuedCommentInterruptId: input.queuedCommentInterruptId } : {}),
     ...(queuedRequest ? { queuedCommentRequestId: input.queuedCommentRequestId } : {}), runId: input.successorRunId,
     previousRunId: previous.id, recordedAt: new Date().toISOString() };
-  for (const runId of cancelledStartupIds) {
-    await db.update(nativeRunFinalizations).set({
-      phase: "terminal_failure", failureCode: "native_startup_cancelled", nextAttemptAt: null,
-      controlDeadlineAt: null, updatedAt: new Date(),
-    }).where(and(eq(nativeRunFinalizations.companyId, companyId), eq(nativeRunFinalizations.runId, runId)));
-    await db.update(heartbeatRuns).set({
-      ...(nativeSources.some(run => run.id === runId) ? { nativePhase: "terminal_failure", nativePhaseUpdatedAt: new Date() } : {}),
-      executionControlDeadlineAt: null,
-    }).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId)));
-  }
+  if (cancelledStartupIds.size) await db.transaction(async tx => {
+    await notifyExecutionRunWork(tx);
+    for (const runId of cancelledStartupIds) {
+      await tx.update(nativeRunFinalizations).set({
+        phase: "terminal_failure", failureCode: "native_startup_cancelled", nextAttemptAt: null,
+        controlDeadlineAt: null, updatedAt: new Date(),
+      }).where(and(eq(nativeRunFinalizations.companyId, companyId), eq(nativeRunFinalizations.runId, runId)));
+      await tx.update(heartbeatRuns).set({
+        ...(nativeSources.some(run => run.id === runId) ? { nativePhase: "terminal_failure", nativePhaseUpdatedAt: new Date() } : {}),
+        executionControlDeadlineAt: null,
+      }).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId)));
+    }
+  });
   if (nativeSources.length) await db.update(nativeRunFinalizations).set({
     failureDetail: sql`coalesce(${nativeRunFinalizations.failureDetail}, '{}'::jsonb) || ${JSON.stringify({ replacementDenied: "explicit_user_continuation" })}::jsonb`,
     updatedAt: new Date(),

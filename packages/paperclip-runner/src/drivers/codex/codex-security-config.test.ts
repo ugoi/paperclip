@@ -29,7 +29,7 @@ describe("Codex security configuration", () => {
       import assert from "node:assert/strict";
       import { execFileSync } from "node:child_process";
       import { createRequire } from "node:module";
-      import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+      import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
       import { tmpdir } from "node:os";
       import { delimiter, dirname, isAbsolute, join } from "node:path";
       import { resolveCodexCommand, resolvePinnedCodexCommand } from ${JSON.stringify(new URL("./codex-command.ts", import.meta.url).href)};
@@ -225,13 +225,13 @@ describe("Codex security configuration", () => {
         rmSync(vendor, { recursive: true });
         symlinkSync(outsideVendor, vendor);
         assert.ok(!normalizedRoots().includes(outsideVendor), "A vendor symlink must not escape the selected platform package");
-        rmSync(vendor); mkdirSync(vendor);
+        unlinkSync(vendor); mkdirSync(vendor);
         const outsidePlatform = join(root, "outside-platform");
         mkdirSync(join(outsidePlatform, "vendor"), { recursive: true });
         writeFileSync(join(outsidePlatform, "package.json"), JSON.stringify(platformMetadata));
         rmSync(platform, { recursive: true }); symlinkSync(outsidePlatform, platform);
         assert.ok(!normalizedRoots().includes(join(outsidePlatform, "vendor")), "An alias symlink must not grant a foreign package");
-        rmSync(platform); mkdirSync(vendor, { recursive: true });
+        unlinkSync(platform); mkdirSync(vendor, { recursive: true });
         writeFileSync(join(platform, "package.json"), JSON.stringify(platformMetadata));
 
       } finally { rmSync(root, { recursive: true, force: true }); rmSync(pathOnlyRoot, { recursive: true, force: true }); }
@@ -487,5 +487,24 @@ describe("Codex security configuration", () => {
     expect(createIsolatedCodexAppServerArgs({})).not.toContain(
       "--dangerously-bypass-approvals-and-sandbox",
     );
+  });
+});
+
+
+describe("explicit trusted host Codex permissions", () => {
+  const source = { HOME: "/Users/operator", CODEX_HOME: "/Users/operator/worker-home", PAPERCLIP_RUNNER_HOME_MODE: "preconfigured" };
+  it("uses full host access only for the explicit selected capability", () => {
+    const args = createIsolatedCodexAppServerArgs(source, [], undefined, [], true);
+    expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(args.join("\n")).toContain('default_permissions="paperclip-runner-trusted-host"');
+    expect(args.join("\n")).toContain('permissions.paperclip-runner-trusted-host.filesystem={":root"="write"}');
+    expect(args.join("\n")).not.toContain('default_permissions="paperclip-runner-external-sandbox"');
+    expect(createIsolatedCodexAppServerArgs(source)).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(createIsolatedCodexAppServerArgs({ ...source, PAPERCLIP_RUNNER_TRUSTED_HOST_FULL_ACCESS: "1" })).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+  it("requires a preconfigured home and retains the plan permission profile", () => {
+    expect(() => createIsolatedCodexAppServerArgs({}, [], undefined, [], true)).toThrow("trusted_host_requires_preconfigured_home");
+    expect(createSecuredCodexThreadParams("/workspace", "default", true, false, source, true).permissions).toBe("paperclip-runner-trusted-host");
+    expect(createSecuredCodexThreadParams("/workspace", "plan", true, false, source, true).permissions).toBe("paperclip-runner-workspace-read-only");
   });
 });

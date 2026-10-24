@@ -84,6 +84,8 @@ export type PaperclipRunnerNativeProviderInput =
       homeMode?: "isolated" | "preconfigured";
       codexApprovalPolicy: "never" | "on-request" | "untrusted";
       codexReasoningEffort?: string;
+      codexSandboxMode?: "danger-full-access";
+      remoteCodexHome?: string;
     }
   | {
       provider: "opencode";
@@ -616,6 +618,7 @@ export function resolvePaperclipRunnerNativeProviderInput(input: {
     throw new PaperclipRunnerProviderProfileError("paperclip_runner_home_mode_invalid", "homeMode must be isolated or preconfigured");
   }
   const preconfigured = config.homeMode === "preconfigured";
+  if ((config.codexSandboxMode !== undefined || config.remoteCodexHome !== undefined) && profile.provider !== "codex") throw new PaperclipRunnerProviderProfileError("paperclip_runner_trusted_host_requires_codex", "Trusted host settings require native Codex.");
   if (preconfigured && profile.provider !== "codex" && !(profile.provider === "acpx" && ["claude", "codex"].includes(profile.acpxAgent))) {
     throw new PaperclipRunnerProviderProfileError("paperclip_runner_home_mode_unsupported", "Preconfigured home supports native Codex and ACPX Claude only");
   }
@@ -833,8 +836,13 @@ export function resolvePaperclipRunnerNativeProviderInput(input: {
       "Paperclip Runner Codex reasoning effort is not supported for this model.",
     );
   }
+  if (config.codexSandboxMode !== undefined && config.codexSandboxMode !== "danger-full-access") throw new PaperclipRunnerProviderProfileError("paperclip_runner_codex_sandbox_mode_invalid", "Unsupported codexSandboxMode.");
+  if ((config.codexSandboxMode !== undefined || config.remoteCodexHome !== undefined) && !preconfigured) throw new PaperclipRunnerProviderProfileError("paperclip_runner_trusted_host_requires_preconfigured", "Trusted host settings require preconfigured homeMode.");
+  if (config.remoteCodexHome !== undefined && (typeof config.remoteCodexHome !== "string" || !config.remoteCodexHome.startsWith("/") || config.remoteCodexHome === "/" || /[\0\r\n]/.test(config.remoteCodexHome) || config.remoteCodexHome.split("/").some(part => part === "." || part === ".."))) throw new PaperclipRunnerProviderProfileError("paperclip_runner_remote_codex_home_invalid", "remoteCodexHome must be an absolute canonical directory.");
   return {
     provider: "codex",
+    ...(config.codexSandboxMode === "danger-full-access" ? { codexSandboxMode: "danger-full-access" as const } : {}),
+    ...(typeof config.remoteCodexHome === "string" ? { remoteCodexHome: config.remoteCodexHome } : {}),
     model: compatibleCodexModel(profile.model, input.codexCliVersion ?? null),
     ...(preconfigured ? { homeMode: "preconfigured" as const } : {}),
     codexApprovalPolicy: resolvePaperclipRunnerPermissionMode(

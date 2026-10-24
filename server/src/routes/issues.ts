@@ -5601,7 +5601,7 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
-    if (req.actor.source === "agent_jwt" && req.actor.runId &&
+    if ((req.actor.source === "agent_jwt" || req.actor.source === "agent_key") && req.actor.runId &&
         issue.assigneeAgentId === null && issue.assigneeUserId) {
       const run = await heartbeat.getRun(req.actor.runId);
       if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue);
@@ -14361,7 +14361,9 @@ export function issueRoutes(
         const runToStopForReassignment = await resolveActiveIssueRun(existing);
         const isHumanSelfHandoff =
           req.actor.type === "agent" &&
-          req.actor.source === "agent_jwt" &&
+          // Remote adapters use agent keys. Their run header must still match
+          // the active run's agent, company and issue below; it is not authority alone.
+          (req.actor.source === "agent_jwt" || req.actor.source === "agent_key") &&
           nextAssigneeAgentId === null &&
           typeof nextAssigneeUserId === "string" &&
           req.actor.agentId === existing.assigneeAgentId &&
@@ -17681,6 +17683,27 @@ export function issueRoutes(
           source: "issue.interaction.withdraw",
         });
       }
+      res.json(interaction);
+    },
+  );
+
+  router.post(
+    "/issues/:id/interactions/:interactionId/dismiss",
+    async (req, res) => {
+      assertBoard(req);
+      const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+      if (!issue) return;
+      if (!(await assertIssueReadAllowed(req, res, issue))) return;
+      const actor = getActorInfo(req);
+      const interaction = await issueThreadInteractionService(db).dismissInteraction(
+        issue, req.params.interactionId as string,
+        { userId: actor.actorType === "user" ? actor.actorId : null },
+      );
+      await logActivity(db, {
+        companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+        action: "issue.thread_interaction_dismissed", entityType: "issue", entityId: issue.id,
+        details: { interactionId: interaction.id, interactionKind: interaction.kind },
+      });
       res.json(interaction);
     },
   );

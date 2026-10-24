@@ -83,6 +83,7 @@ export function parseKubernetesProviderConfig(input: unknown): KubernetesProvide
 
 export interface KubernetesLeaseMetadata {
   namespace: string;
+  remoteCwd?: string;
   /** Name of the workload resource (Job name for job backend, Sandbox CR name for sandbox-cr backend). */
   jobName: string;
   podName: string | null;

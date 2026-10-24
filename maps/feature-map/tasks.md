@@ -17,9 +17,15 @@ Agent access: [companion](../agent-access-map/tasks.md).
 - `create`: `tasks/create` — capture a title/request with the intended agent, project, and attachments.
 - `organize`: `tasks/organize` — filter, sort, group, and navigate tasks without losing the selected context.
 - `properties`: `tasks/properties` — change status, priority, assignee, project, and relationships where authorized.
+
 - `discussion`: `tasks/discussion` — persist comments, references, and files on the task.
 - `completion`: `tasks/completion` — distinguish backlog, active work, review, blocked, done, and cancelled outcomes.
 - `privacy`: `tasks/privacy` — create private tasks, share or revoke access, and inspect parent/project inheritance before changing visibility.
+
+The [Product task-properties journey](../../tests/runner-e2e/PRODUCT-JOURNEYS.md)
+checks only assignment to the signed-in user and persistence after reload. Its
+source is reusable across self-hosted and Cloud; Cloud live qualification is
+separate. It does not cover other property operations or agent authorization.
 
 ## How to get to it (user POV)
 
@@ -106,7 +112,9 @@ Manual: For a disposable task owned by a legacy agent, have its current run
 assign the task to a human with status In review. Verify that assignment and
 status persist, that the current run finishes without `issue_reassigned`, and
 that slow workspace restoration does not turn the task Blocked. Try a later edit
-from the outgoing run and verify rejection. Repeat a board
+from the outgoing run and verify rejection. Cover both signed run JWTs and
+standard agent keys with the matching run header. Reject missing or foreign run
+identity. Repeat a board
 reassignment and confirm that the outgoing run still stops.
 
 Manual: Add a comment and edit authorized properties. Reload and verify history, actor, and values. Complete a disposable task and inspect its deliverable; reopen through an available action and confirm the next execution follows current policy.

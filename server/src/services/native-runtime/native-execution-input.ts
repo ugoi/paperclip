@@ -101,6 +101,8 @@ export interface BuildNativeExecutionInput {
   acpxAgent?: NativeAcpxAgent;
   homeMode?: "isolated" | "preconfigured";
   codexApprovalPolicy?: NativeCodexApprovalPolicy;
+  codexSandboxMode?: "danger-full-access";
+  remoteCodexHome?: string;
   codexReasoningEffort?: string;
   opencodePermissionMode?: NativeOpenCodePermissionMode;
   acpxPermissionMode?: NativeAcpxPermissionMode;
@@ -363,6 +365,8 @@ export function buildNativeExecutionInput(input: BuildNativeExecutionInput): Nat
             kind: "codex",
             model: input.model ?? null,
             approvalPolicy: input.codexApprovalPolicy ?? "never",
+            ...(input.codexSandboxMode !== undefined ? { sandboxMode: input.codexSandboxMode } : {}),
+            ...(input.remoteCodexHome !== undefined ? { remoteCodexHome: input.remoteCodexHome } : {}),
             ...(input.codexReasoningEffort ? { reasoningEffort: input.codexReasoningEffort } : {}),
           },
     completionContract: {

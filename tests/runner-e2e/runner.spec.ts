@@ -1,6 +1,15 @@
+import { createWorkerTiming } from "./worker-timing.js";
+import { FEEDBACK_PERSISTENCE_SUITE, gradeFeedbackPersistence } from "./feedback-persistence.js";
+import { EvalAttemptTrace, evalBraintrustConfig, EVAL_OBSERVABILITY_SECRET_NAMES } from "./braintrust.js";
+import { captureFollowupStopFailureApiState } from "./followup-stop-evidence.js";
+import { runFollowupStopResumeFlow } from "./followup-stop-resume-flow.js";
+import { runFinalizationRecoveryFlow } from "./finalization-recovery-flow.js";
+import type { FinalizationCrashBinding } from "./finalization-crash-boundary.js";
 import { runCaseHandoffsFlow } from "./case-handoffs-flow.js";
 import { runCaseReceiptFlow } from "./case-receipt-flow.js";
 import { runTaskWorkspacesFlow } from "./task-workspaces-flow.js";
+import { runRepositoryVerificationFlow } from "./repository-verification-flow.js";
+import { runAutomaticRepositoryFlow } from "./automatic-repository-flow.js";
 import { runNativeActiveStopFlow as runCopilotActiveStopFlow } from "./copilot-active-stop-flow.js";
 import { nativeActiveStopTasks as copilotActiveStopTasks } from "./copilot-active-stop-tasks.js";
 import type { RestartRunnerIdentity } from "./process-tree-owner.js";
@@ -40,6 +49,7 @@ import { runRepositorySkillsFlow } from "./repository-skills.js";
 import { captureStockHarness, gradeStockHarness, gradeStockHire } from "./stock-harness.js";
 import { verifyStockHarnessPreflight, STOCK_PREFLIGHT_ENV } from "./stock-harness-admission.js";
 import { createTaskThroughUi, submitTaskReply } from "./user-actions.js";
+import { armResponseTiming } from "./response-timing.js";
 
 import { projectFirstTaskResult, runFirstTaskFlow, setupFirstTaskFixtures } from "./first-task-flow.js";
 import { runChatFlow } from "./chat-flow.js";
@@ -51,6 +61,8 @@ import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { RunnerApi, pollUntil } from "./api.js";
 import { buildRuntimeUsage, summarizeExecutionBilling } from "./billing.js";
+import { collectAttemptFeedback, emptyFeedbackSummary } from "./feedback.js";
+import { finishBudgetedEvalSetup } from "./budgeted-setup.js";
 import { establishPublicMcpSession, runPublicMcpFlow } from "./public-mcp-flow.js";
 import { assistantUsage } from "./public-mcp-model.js";
 import { runnerExecutionById } from "./catalog.js";
@@ -251,6 +263,7 @@ async function restartIsolatedPaperclipServer(input: {
   requestId: string;
   deadlineAt: number;
   preserveRunner?: RestartRunnerIdentity;
+  crashAfterResult?: FinalizationCrashBinding;
 }): Promise<void> {
   const {
     controlDirectory,
@@ -261,7 +274,8 @@ async function restartIsolatedPaperclipServer(input: {
   const temporaryRequestPath = `${requestPath}.${process.pid}.${input.requestId}.tmp`;
   await writeFile(
     temporaryRequestPath,
-    JSON.stringify({ requestId: input.requestId, ...(input.preserveRunner ? { preserveRunner: input.preserveRunner } : {}) }),
+    JSON.stringify({ requestId: input.requestId, ...(input.preserveRunner ? { preserveRunner: input.preserveRunner } : {}),
+      ...(input.crashAfterResult ? { crashAfterResult: input.crashAfterResult } : {}) }),
     { encoding: "utf8", mode: 0o600 },
   );
   await rename(temporaryRequestPath, requestPath);
@@ -350,7 +364,9 @@ async function writeSanitizedJson(
   name: string,
   value: unknown,
   secrets: readonly string[],
+  signal?: AbortSignal,
 ) {
+  signal?.throwIfAborted();
   const raw = `${JSON.stringify(value)}\n`;
   // Public API payloads may contain harmless provider-shaped fixtures or
   // opaque generated tokens. Reject exact campaign credentials before writing,
@@ -359,8 +375,9 @@ async function writeSanitizedJson(
   const safe = `${JSON.stringify(sanitizeJson(value, secrets), null, 2)}\n`;
   const leak = findSecretLeakInJsonValues(JSON.parse(safe), secrets);
   if (leak) throw new Error(`Secret leak in ${name}: ${leak}`);
+  signal?.throwIfAborted();
   await mkdir(directory, { recursive: true });
-  await writeFile(path.join(directory, name), safe, "utf8");
+  await writeFile(path.join(directory, name), safe, { encoding: "utf8", signal });
 }
 
 async function submitTaskRevision(page: Page, body: string): Promise<number> {
@@ -584,6 +601,7 @@ for (const execution of executions) {
     }
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
+    const workerTiming = await createWorkerTiming(path.join(snapshotsDir, "worker-timing.json"), { executionId: execution.id, attempt }, startedAtMs);
     const nonce = `${randomBytes(6).toString("hex")}-${attempt}`;
     const marker = execution.task.buildVisibleMarker(nonce);
     const title = execution.task.buildTitle(nonce);
@@ -600,7 +618,20 @@ for (const execution of executions) {
       verifyNativeInstructionPreflight(process.env[NATIVE_INSTRUCTION_PREFLIGHT_ENV]);
     }
     const credentials = credentialValues();
-    const secrets = normalizedSecrets(Object.values(credentials));
+    const secrets = normalizedSecrets([...Object.values(credentials), ...EVAL_OBSERVABILITY_SECRET_NAMES.map(name => process.env[name]), process.env.PAPERCLIP_E2E_GATEWAY_TOKEN]);
+    const traceConfig = evalBraintrustConfig(process.env);
+    const trace = traceConfig ? new EvalAttemptTrace(traceConfig, {
+      campaignId: process.env.PAPERCLIP_E2E_ACCOUNTING_CAMPAIGN_ID ?? "",
+      attemptId: process.env.PAPERCLIP_E2E_ACCOUNTING_ATTEMPT_ID ?? "",
+      executionId: execution.id, provider: execution.profile.provider, model: execution.profile.model, environment: execution.environment.id,
+    }, {
+      suiteId: execution.suite.id, suiteDefinitionHash: execution.suiteDefinitionHash,
+      profileId: execution.profile.id, caseId: execution.task.id, sourceRevision: resolveRunnerE2ESource().sha,
+    }) : undefined;
+    const saveTrace = async () => { if (trace) await writeSanitizedJson(snapshotsDir, "braintrust-trace.json", trace.snapshot(), secrets); };
+    const onCompanyCreated = async (id: string) => {
+      if (trace) { try { await trace.configureCompany(api, id); } finally { await saveTrace(); } }
+    };
     const api = new RunnerApi(request);
     const companyRunFlow = execution.suite.id === "task-titles" || ["plan_task_guidance", "blocker_guidance", "continuation_accounting", "continuation", "context_integrity", "repository_skills", "agent_chat", "everyday_workflow", "first_task", "instruction_persistence", "pi_native", "pi_controls", "copilot_protection", "cursor_native", "native_active_stop", "native_provider_loss", "public_mcp", "case_handoff"].includes(execution.task.flow);
     const publicMcpUsage = execution.task.flow === "public_mcp" ? assistantUsage(execution.profile.provider === "claude" ? "anthropic" : "openai", execution.profile.model) : undefined;
@@ -617,6 +648,7 @@ for (const execution of executions) {
     let issue: IssueRecord | undefined;
     let workflowCase: { id: string; identifier?: string } | undefined;
     let selectedRuns: RunRecord[] = [];
+    let feedback = emptyFeedbackSummary();
     let runtimeLeases: EnvironmentLeaseRecord[] = [];
     let matcherResults: MatcherResult[] = [];
     let downloadedResponseProof: Awaited<ReturnType<typeof readResponseProof>> | undefined;
@@ -647,6 +679,7 @@ for (const execution of executions) {
     };
     let firstTaskEvidence: RunnerE2EResult["firstTask"];
     let turnTimings: NonNullable<RunnerE2EResult["turnTimings"]> | undefined;
+    let responseTiming: ReturnType<typeof armResponseTiming> | undefined;
     let startupReuse: RunnerE2EResult["startupReuse"];
     const turnSubmissionTimesMs: number[] = [];
     const screenshots: NonNullable<RunnerE2EResult["screenshots"]> = [];
@@ -751,6 +784,13 @@ for (const execution of executions) {
 
     const captureFailureApiState = async () => {
       if (!fixtures) return;
+      if (execution.task.flow === "followup_stop_resume") {
+        const captured = await captureFollowupStopFailureApiState({ api, companyId: fixtures.company.id,
+          agentId: fixtures.agent.id, issueId: issue?.id,
+          evidence: (name, value) => writeSanitizedJson(snapshotsDir, name, value, secrets) });
+        if (captured) { issue = captured.issue as IssueRecord; selectedRuns = captured.runs as RunRecord[]; }
+        return;
+      }
       if (companyRunFlow && !issue) {
         const companyRuns = await api.get<RunRecord[]>(`/api/companies/${fixtures.company.id}/heartbeat-runs?limit=100`);
         selectedRuns = await Promise.all(companyRuns.map(run => api.get<RunRecord>(`/api/heartbeat-runs/${run.id}`)));
@@ -874,6 +914,8 @@ for (const execution of executions) {
     });
 
     try {
+      trace?.phase("setup");
+      await saveTrace();
       if (execution.task.flow === "public_mcp") publicMcpUserId = await establishPublicMcpSession(api, page, secrets);
       if (execution.suite.id === "stock-harness") {
         const receipt = verifyStockHarnessPreflight(process.env[STOCK_PREFLIGHT_ENV]);
@@ -903,7 +945,7 @@ for (const execution of executions) {
         await setupGitStreamingWorkspace(workspacePath);
       }
       fixtures = execution.task.flow === "first_task"
-        ? await setupFirstTaskFixtures({ page, api, execution, nonce, credentials, daytonaImage: process.env.PAPERCLIP_E2E_DAYTONA_IMAGE, deadlineAt: startedAtMs + deadlineMs, observe: value => { fixtures = value; } })
+        ? await setupFirstTaskFixtures({ page, api, execution, nonce, credentials, daytonaImage: process.env.PAPERCLIP_E2E_DAYTONA_IMAGE, deadlineAt: startedAtMs + deadlineMs, observe: value => { fixtures = value; }, onCompanyCreated })
         : await setupLiveFixtures({
         api,
         execution,
@@ -911,7 +953,13 @@ for (const execution of executions) {
         workspacePath,
         credentials,
         daytonaImage: process.env.PAPERCLIP_E2E_DAYTONA_IMAGE,
+        onCompanyCreated,
       });
+      await finishBudgetedEvalSetup({ executionId: execution.id, agentId: fixtures.agent.id,
+        companyId: fixtures.company.id, deadlineAt: startedAtMs + deadlineMs, api,
+        observe: observations => writeSanitizedJson(snapshotsDir, "budgeted-setup.json", { observations }, secrets) });
+      await workerTiming.enter("execution");
+      trace?.phase("execution");
 
       if (["native-completion", NATIVE_INSTRUCTION_SUITE].includes(execution.suite.id)) {
         const receipt = await captureNativeDefault({ api, agentId: fixtures.agent.id, companyId: fixtures.company.id });
@@ -1020,6 +1068,43 @@ for (const execution of executions) {
           matcherResults,
         }, secrets);
         await captureScreenshot("final-state", "Final visible task state", "final-state.png");
+      } else if (execution.task.flow === "followup_stop_resume") {
+        const journey = await runFollowupStopResumeFlow({ page, api, fixtures, execution, nonce, workspacePath: workspacePath!, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `followupStopResume.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
+      } else if (execution.task.flow === "finalization_recovery") {
+        const journey = await runFinalizationRecoveryFlow({ page, api, fixtures, execution, nonce, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          restart: binding => restartIsolatedPaperclipServer({ api, requestId: `finalization-${nonce}`, deadlineAt: startedAtMs + deadlineMs, crashAfterResult: binding }),
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `finalizationRecovery.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
+      } else if (execution.task.flow === "repository_verification") {
+        const journey = await runRepositoryVerificationFlow({ page, api, fixtures, execution, nonce, workspacePath: workspacePath!, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `repositoryVerification.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
+      } else if (execution.task.flow === "automatic_repository") {
+        const journey = await runAutomaticRepositoryFlow({ page, api, fixtures, execution, nonce, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `automaticRepository.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
       } else if (execution.task.flow === "task_workspaces") {
         const journey = await runTaskWorkspacesFlow({ page, api, fixtures, execution, nonce, temporaryRoot,
           deadlineAt: startedAtMs + deadlineMs - 30_000,
@@ -1238,6 +1323,8 @@ for (const execution of executions) {
           workMode: execution.task.workMode,
           projectName: fixtures.project?.name,
           requireExplicitTitle: execution.suite.id === "task-titles" && Boolean(title),
+          beforeDispatch: execution.suite.id === "codie-latency-diagnostic"
+            ? () => { responseTiming = armResponseTiming({ page }); } : undefined,
         });
       turnSubmissionTimesMs.push(createdTask.submittedAtMs);
 
@@ -1290,6 +1377,7 @@ for (const execution of executions) {
       );
 
       const loadTaskState = async () => {
+        const observeSettlement = responseTiming?.beginSettlement();
         const [currentIssue, runs, comments, interactions] = await Promise.all([
           api.get<IssueRecord>(`/api/issues/${issue!.id}`),
           api.get<RunRecord[]>(
@@ -1302,6 +1390,9 @@ for (const execution of executions) {
           ),
           api.get<InteractionRecord[]>(`/api/issues/${issue!.id}/interactions`),
         ]);
+        observeSettlement?.({ present: currentIssue.status === execution.task.expectedTerminalState.issue
+          && matchingRuns(runs, currentIssue).length >= minimumRunCount(execution.task)
+          && matchingRuns(runs, currentIssue).every(run => TERMINAL_RUN_STATUSES.has(run.status)) });
         return {
           currentIssue,
           taskRuns: matchingRuns(runs, currentIssue),
@@ -3018,6 +3109,9 @@ for (const execution of executions) {
         }
       }
     } finally {
+      await workerTiming.enter("cleanup");
+      trace?.phase("cleanup", Boolean(primaryError));
+      await responseTiming?.stop();
       await reviewProvider?.close();
       try {
         await writeSanitizedJson(
@@ -3075,7 +3169,29 @@ for (const execution of executions) {
               }
             },
             assertions: beforeEnvironmentTeardownAssertions,
-            teardown: () => fixtures!.teardown(),
+            teardown: async () => {
+              await workerTiming.enter("feedback");
+              trace?.phase("feedback");
+              try {
+                feedback = await collectAttemptFeedback({ api, companyId: fixtures!.company.id,
+                  onCheckpoint: summary => { feedback = summary; },
+                  persist: async (evidence, signal) => {
+                    await writeSanitizedJson(snapshotsDir, "agent-feedback.pending.json", evidence, secrets, signal);
+                    signal.throwIfAborted();
+                    await rename(path.join(snapshotsDir, "agent-feedback.pending.json"), path.join(snapshotsDir, "agent-feedback.json"));
+                    signal.throwIfAborted();
+                  },
+                });
+              } catch {
+                feedback.collection = feedback.bodiesCollected ? "partial" : "unavailable";
+                feedback.invocationCollection = "unavailable";
+                networkDiagnostics.push({ feedbackCaptureError: "feedback_evidence_write_failed" });
+              } finally {
+                await workerTiming.enter("cleanup");
+                trace?.phase("cleanup", !["complete", "not_started"].includes(feedback.collection));
+                await fixtures!.teardown();
+              }
+            },
           });
           matcherResults.push(...verification.checks.map(check => ({
             matcher: { kind: "json_path" as const, path: `remoteCleanup.${check.id}`, expected: true }, passed: check.passed, detail: check.detail,
@@ -3141,6 +3257,20 @@ for (const execution of executions) {
         }
       }
 
+      await workerTiming.enter("finalization");
+      if (execution.suite.id === FEEDBACK_PERSISTENCE_SUITE) {
+        let evidence: unknown;
+        try { evidence = JSON.parse(await readFile(path.join(snapshotsDir, "agent-feedback.json"), "utf8")); } catch { evidence = undefined; }
+        const checks = gradeFeedbackPersistence({ evidence, nonce, companyId: fixtures?.company.id,
+          agentId: fixtures?.agent.id, taskId: issue?.id, runIds: selectedRuns.map(run => run.id) });
+        matcherResults.push(...checks.map(check => ({ matcher: { kind: "json_path" as const,
+          path: `feedbackPersistence.${check.id}`, expected: true }, passed: check.passed, detail: check.detail })));
+        if (checks.some(check => !check.passed)) primaryError ??= new Error("Feedback persistence matcher failed");
+      }
+
+      const traceReceipt = await trace?.export({ failed: Boolean(primaryError), runIds: selectedRuns.map(run => run.id),
+        cleanup, complaints: feedback.complaints, suggestions: feedback.suggestions });
+      await saveTrace();
       const finishedAtMs = Date.now();
       const runtimeUsage = fixtureRuntimeCostCoverage(buildRuntimeUsage({
         environmentId: execution.environment.id,
@@ -3150,6 +3280,12 @@ for (const execution of executions) {
       }), fixtures ?? {});
       const resultWithoutBilling: RunnerE2EResult = {
         schema: "paperclip.runner-e2e.result/v2",
+        ...(process.env.PAPERCLIP_E2E_ACCOUNTING_CAMPAIGN_ID && process.env.PAPERCLIP_E2E_ACCOUNTING_ATTEMPT_ID ? {
+          accountingIdentity: {
+            campaignId: process.env.PAPERCLIP_E2E_ACCOUNTING_CAMPAIGN_ID,
+            attemptId: process.env.PAPERCLIP_E2E_ACCOUNTING_ATTEMPT_ID,
+          },
+        } : {}),
         executionId: execution.id,
         suiteId: execution.suite.id,
         suiteDefinitionHash: execution.suiteDefinitionHash,
@@ -3182,10 +3318,12 @@ for (const execution of executions) {
         issueIdentifier: issue?.identifier ?? null,
         runIds: selectedRuns.map((run) => run.id),
         ...(turnTimings ? { turnTimings } : {}),
+        ...(responseTiming ? { latencyProbes: responseTiming.results() } : {}),
         ...(startupReuse ? { startupReuse } : {}),
         startedAt,
         finishedAt: new Date(finishedAtMs).toISOString(),
         durationMs: finishedAtMs - startedAtMs,
+        workerTiming: await workerTiming.finish(finishedAtMs),
         usage:
           selectedRuns.length === 1
             ? (selectedRuns[0]?.usageJson ?? null)
@@ -3196,6 +3334,8 @@ for (const execution of executions) {
                 })),
               },
         runtimeUsage,
+        feedback,
+        ...(traceReceipt ? { tracing: traceReceipt } : {}),
         matcherResults,
         screenshots,
         cleanup,

@@ -178,6 +178,8 @@ function gitFilesystemRoots(source: NodeJS.ProcessEnv): { read: string[]; write:
   return { read: [...new Set(read)], write: [...new Set(write)] };
 }
 
+export const CODEX_TRUSTED_HOST_PERMISSION_PROFILE = "paperclip-runner-trusted-host";
+
 function usesExternalRunnerSandbox(source: NodeJS.ProcessEnv): boolean {
   return source.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX === "1";
 }
@@ -254,6 +256,7 @@ export function createIsolatedCodexAppServerArgs(
   /** Server-registered run copy, never an environment/config-supplied root. */
   instructionWorkingCopyRoot?: string,
   protectedPaths: string[] = [],
+  trustedHostFullAccess = false,
 ): string[] {
   const explicitSource = source;
   source ??= process.env;
@@ -261,6 +264,7 @@ export function createIsolatedCodexAppServerArgs(
   readOnlyRoots = [...new Set([...readOnlyRoots, ...codexNetworkReadOnlyRoots(source)])];
   const networkAccess = codexNetworkAccess(source);
   const externalRunnerSandbox = usesExternalRunnerSandbox(source);
+  if (trustedHostFullAccess && !usesPreconfiguredHome(source)) throw new Error("trusted_host_requires_preconfigured_home");
   const inheritedGitHubKeys = [
     ...githubCredentialEnvironmentKeys(source),
     ...configuredEnvironmentKeys(explicitSource),
@@ -317,7 +321,9 @@ export function createIsolatedCodexAppServerArgs(
   const commandEnv = Object.entries(commandEnvironment)
     .map(([key, value]) => `${key}=${tomlString(value)}`)
     .join(",");
-  const defaultPermissionProfile = externalRunnerSandbox
+  const defaultPermissionProfile = trustedHostFullAccess
+    ? CODEX_TRUSTED_HOST_PERMISSION_PROFILE
+    : externalRunnerSandbox
     ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
     : CODEX_SKILLLESS_PERMISSION_PROFILE;
   return [
@@ -327,6 +333,10 @@ export function createIsolatedCodexAppServerArgs(
     `permissions.${CODEX_SKILLLESS_PERMISSION_PROFILE}.filesystem={${filesystemRules}}`,
     "-c",
     `permissions.${CODEX_SKILLLESS_PERMISSION_PROFILE}.network.enabled=${networkAccess}`,
+    ...(trustedHostFullAccess ? [
+      "-c", `permissions.${CODEX_TRUSTED_HOST_PERMISSION_PROFILE}.filesystem={":root"="write"}`,
+      "-c", `permissions.${CODEX_TRUSTED_HOST_PERMISSION_PROFILE}.network.enabled=true`,
+    ] : []),
     ...(externalRunnerSandbox
       ? [
           "-c",
@@ -353,7 +363,7 @@ export function createIsolatedCodexAppServerArgs(
       : []),
     "--disable",
     "image_generation",
-    ...(externalRunnerSandbox
+    ...((externalRunnerSandbox || trustedHostFullAccess)
       ? ["--dangerously-bypass-approvals-and-sandbox"]
       : []),
     "app-server",
@@ -366,8 +376,13 @@ export function createSecuredCodexThreadParams(
   includeCollaborationModeInstructions = true,
   includeSkillInstructions = false,
   source: NodeJS.ProcessEnv = process.env,
+  trustedHostFullAccess = false,
 ): Record<string, unknown> {
+  if (trustedHostFullAccess && !usesPreconfiguredHome(source)) throw new Error("trusted_host_requires_preconfigured_home");
   const permissionProfile =
+    mode === "default" && trustedHostFullAccess
+      ? CODEX_TRUSTED_HOST_PERMISSION_PROFILE
+      :
     mode === "default" && usesExternalRunnerSandbox(source)
       ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
       : mode === "plan"

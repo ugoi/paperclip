@@ -108,7 +108,8 @@ function createTransportBackedNativeSessionBackend(
   options: CodexNativeSessionBackendOptions,
 ): NativeSessionBackend {
   if (
-    options.workingDirectoryAuthority === "remote_runner" &&
+    (options.workingDirectoryAuthority === "remote_runner" ||
+      options.workingDirectoryAuthority === "runner_prepared_launch") &&
     !options.transportFactory
   ) {
     throw new Error(
@@ -152,6 +153,7 @@ function createTransportBackedNativeSessionBackend(
   const transportFactory = options.transportFactory;
   return new HarnessDriverBackend(
     new CodexAppServerDriver({
+      trustedHostFullAccess: isCodex && input.provider.kind === "codex" && input.provider.sandboxMode === "danger-full-access",
       ...(input.provider.model ? { model: input.provider.model } : {}),
       ...(input.provider.kind === "codex" && "reasoningEffort" in input.provider && input.provider.reasoningEffort
         ? { reasoningEffort: input.provider.reasoningEffort }

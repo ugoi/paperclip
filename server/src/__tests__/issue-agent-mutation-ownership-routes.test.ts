@@ -2836,7 +2836,7 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
-  describe("human self-handoff", () => {
+  describe.each(["agent_jwt", "agent_key"])("human self-handoff (%s)", source => {
     const runningRun = {
       id: ownerRunId,
       companyId,
@@ -2870,7 +2870,7 @@ describe("agent issue mutation checkout ownership", () => {
       mockIssueService.getById.mockResolvedValue(makeIssue({ status, executionRunId: ownerRunId }));
       mockHeartbeatService.cancelRun.mockRejectedValue(new Error("Execution is still stopping; termination has not been verified."));
 
-      const res = await request(handoffApp({ ...ownerActor(), source: "agent_jwt" }))
+      const res = await request(handoffApp({ ...ownerActor(), source }))
         .patch(`/api/issues/${issueId}`).send(handoff);
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -2892,7 +2892,7 @@ describe("agent issue mutation checkout ownership", () => {
     it("recognizes the caller when the active run is resolved without an issue execution lock", async () => {
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_review" }));
       mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(runningRun);
-      const res = await request(handoffApp({ ...ownerActor(), source: "agent_jwt" }))
+      const res = await request(handoffApp({ ...ownerActor(), source }))
         .patch(`/api/issues/${issueId}`).send(handoff);
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       expect(res.body).toMatchObject(handoff);
@@ -2900,7 +2900,7 @@ describe("agent issue mutation checkout ownership", () => {
     });
 
     it.each(["edit", "complete", "reclaim"])("rejects the outgoing run's later %s after handing the task to a human", async action => {
-      const app = handoffApp({ ...ownerActor(), source: "agent_jwt" });
+      const app = handoffApp({ ...ownerActor(), source });
       const handedOff = await request(app).patch(`/api/issues/${issueId}`).send(handoff);
       expect(handedOff.status, JSON.stringify(handedOff.body)).toBe(200);
       mockIssueService.getById.mockResolvedValue(makeIssue(handoff));
@@ -2919,7 +2919,7 @@ describe("agent issue mutation checkout ownership", () => {
     });
 
     it("keeps a queued human response with its current agent", async () => {
-      const res = await request(createApp({ ...ownerActor(), source: "agent_jwt" }))
+      const res = await request(createApp({ ...ownerActor(), source }))
         .patch(`/api/issues/${issueId}`).send(handoff);
       expect(res.status, JSON.stringify(res.body)).toBe(409);
       expect(res.body.code).toBe("interaction_response_queued");
@@ -2934,18 +2934,26 @@ describe("agent issue mutation checkout ownership", () => {
         reason: "deny_policy_restricted",
         explanation: "Assignment requires approval.",
       }));
-      const res = await request(handoffApp({ ...ownerActor(), source: "agent_jwt" }))
+      const res = await request(handoffApp({ ...ownerActor(), source }))
         .patch(`/api/issues/${issueId}`).send({ ...handoff, assigneeUserId: "another-user" });
       expect(res.status, JSON.stringify(res.body)).toBe(403);
       expect(mockIssueService.update).not.toHaveBeenCalled();
       expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
     });
 
-    it.each(["board", "agent_key", "other_run", "native", "other_issue", "other_agent", "other_company"])(
+    it("rejects a handoff without a run identity", async () => {
+      const res = await request(handoffApp({ ...ownerActor(), source, runId: undefined }))
+        .patch(`/api/issues/${issueId}`).send(handoff);
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.code).toBe("cross_issue_influence_run_context_required");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+    });
+
+    it.each(["board", "other_run", "native", "other_issue", "other_agent", "other_company"])(
       "still requires a verified stop for %s reassignment", async scenario => {
-        let actor: Record<string, unknown> = { ...ownerActor(), source: "agent_jwt" };
+        let actor: Record<string, unknown> = { ...ownerActor(), source };
         if (scenario === "board") actor = boardActor();
-        if (scenario === "agent_key") actor = ownerActor();
         const run = {
           ...runningRun,
           ...(scenario === "other_run" ? { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } : {}),
@@ -2967,7 +2975,7 @@ describe("agent issue mutation checkout ownership", () => {
     );
 
     it.each(["agent", "unassigned"])("still stops the outgoing run before an %s handoff", async target => {
-      const res = await request(handoffApp({ ...ownerActor(), source: "agent_jwt" }))
+      const res = await request(handoffApp({ ...ownerActor(), source }))
         .patch(`/api/issues/${issueId}`).send({
           assigneeAgentId: target === "agent" ? peerAgentId : null,
           assigneeUserId: null,

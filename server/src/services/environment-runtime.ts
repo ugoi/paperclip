@@ -4,11 +4,13 @@ import { allowLegacyShutdownWorkspaceCleanup, legacyShutdownWorkspaceResourcePro
 import { nativeWorkspaceExportPendingForLease } from "./native-runtime/native-workspace-finalization-state.js";
 import { beginIdleTrackedWork } from "./task-admission.js";
 import { historicalProviderCredentials } from "./historical-provider-credentials.js";
+import { ownedWorkspaceRecoveryLease, type WorkspaceRecoverySourceIdentity } from "./workspace-recovery-source.js";
+import type { NativeWorkspaceFinalizationOwnership } from "./native-runtime/native-workspace-finalization-ownership.js";
 import { hasStopOnlyCleanup, prepareSandboxStopAndRetain, readStopOnlyCleanup, settleStopOnlyCleanup, stopOnlyCleanupKey } from "./sandbox-stop-and-retain.js";
 import { JsonRpcCallError, readEnvironmentAcquisitionDiagnostic, readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { preserveEnvironmentSyncOutErrorDiagnostic } from "./environment-sync-out-error.js";
 import { captureEnvironmentAcquisitionDiagnostic } from "./environment-acquisition-diagnostics.js";
-import { remoteTerminationReceipt } from "./remote-execution-termination.js";
+import { hasRemoteTerminationReceipt, remoteTerminationReceipt } from "./remote-execution-termination.js";
 import { hasNativeWorkspaceExportResume, releaseCompletedNativeWorkspaceExportRetention } from "./native-runtime/native-workspace-export-resume.js";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
@@ -1234,7 +1236,19 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
     },
 
     async releaseRunLease(input) {
-      return await environmentsSvc.releaseLease(input.lease.id, input.status);
+      return db.transaction(async tx => {
+        const [current] = await tx.select().from(environmentLeases)
+          .where(eq(environmentLeases.id, input.lease.id)).for("update");
+        if (!current || current.companyId !== input.lease.companyId ||
+            current.heartbeatRunId !== input.lease.heartbeatRunId ||
+            current.provider !== "ssh" || current.providerLeaseId !== input.lease.providerLeaseId) return null;
+        // A finalizer may have selected an active lease before the confirmed
+        // Runner close released it. Its stale bookkeeping must not erase the
+        // exact termination receipt. A reacquired active lease has no such
+        // authority and still takes the ordinary release path below.
+        if (hasRemoteTerminationReceipt(current)) return toEnvironmentLeaseSnapshot(current);
+        return environmentService(tx as unknown as Db).releaseLease(current.id, input.status);
+      });
     },
 
     async realizeWorkspace(input) {
@@ -4567,6 +4581,19 @@ export function environmentRuntimeService(
         throw new Error(`Environment driver "${driver.driver}" does not support lease resume.`);
       }
       return await driver.resumeRunLease(input);
+    },
+
+    async resumeWorkspaceRecoveryLease(input: {
+      source: WorkspaceRecoverySourceIdentity; leaseId: string; environmentId: string;
+      ownership: NativeWorkspaceFinalizationOwnership;
+    }): Promise<PluginEnvironmentLease | EnvironmentLease | null> {
+      const { lease, environment } = await ownedWorkspaceRecoveryLease(db, { ...input.source,
+        leaseId: input.leaseId, environmentId: input.environmentId, ownership: input.ownership });
+      const driver = requireDriverKey(getLeaseDriverKey(lease, environment as Environment));
+      if (!driver.resumeRunLease) throw new Error(`Environment driver "${driver.driver}" does not support lease resume.`);
+      // Maintenance reopens the protected source only to preserve its files.
+      // Ordinary resume and destructive cleanup keep their existing fences.
+      return await driver.resumeRunLease({ environment: environment as Environment, lease: lease as EnvironmentLease });
     },
 
     async destroyRunLease(input: EnvironmentDriverLeaseInput): Promise<EnvironmentLease | null> {

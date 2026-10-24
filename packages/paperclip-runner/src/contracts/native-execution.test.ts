@@ -817,3 +817,32 @@ describe("Claude effort input v9", () => {
     expect(() => parseNativeExecutionInput({ ...current, provider: { ...current.provider, agent: "codex", profile: QUALIFIED_ACPX_PROFILES.codex, claudeEffort: "high" } })).toThrow("Claude effort");
   });
 });
+
+
+describe("trusted SSH Codex selection persistence", () => {
+  const digest = "0".repeat(64);
+  const context = {
+    prompt: { revision: PAPERCLIP_EXECUTION_PROMPT_REVISION, text: PAPERCLIP_EXECUTION_PROMPT, digest: nativeRuntimePromptDigest() },
+    instructions: { entryPath: "AGENTS.md", bundle: { schema: NATIVE_RUNTIME_ASSET_SCHEMA, digest, manifestDigest: digest, rootPath: "/runtime/instructions", fileCount: 1, totalBytes: 42 } },
+    skills: [], mcp: { assignmentSetId: "none", digest, bindingId: null },
+  } as const;
+  const preconfigured = {
+      ...input, schema: "paperclip.native-execution-input.v7", homeMode: "preconfigured",
+      provider: { kind: "codex", model: null, approvalPolicy: "never" },
+      executionMode: "default", planningContext: null,
+      runtimeContext: { ...context, aggregateDigest: canonicalNativeRuntimeContextDigest(context) },
+    };
+  const selected = { ...preconfigured, provider: { kind: "codex", model: null, approvalPolicy: "never", sandboxMode: "danger-full-access", remoteCodexHome: "/Users/operator/worker-home" } };
+  it("roundtrips explicit permissions and scoped remote home", () => {
+    const parsed = parseNativeExecutionInput(selected);
+    expect(parsed.provider).toEqual(selected.provider);
+    expect(parseNativeExecutionInput(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
+  });
+  it("rejects isolated, malformed, and unrecognized opt-ins", () => {
+    expect(() => parseNativeExecutionInput({ ...selected, homeMode: "isolated" })).toThrow("preconfigured");
+    for (const remoteCodexHome of ["relative", "/Users/operator/../other", "/", "/Users/operator\nother"]) {
+      expect(() => parseNativeExecutionInput({ ...selected, provider: { ...selected.provider, remoteCodexHome } })).toThrow("remoteCodexHome");
+    }
+    expect(() => parseNativeExecutionInput({ ...selected, provider: { ...selected.provider, sandboxMode: "automatic" } })).toThrow("sandboxMode");
+  });
+});
