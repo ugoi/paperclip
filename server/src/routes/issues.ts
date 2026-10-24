@@ -5601,7 +5601,7 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
-    if (req.actor.source === "agent_jwt" && req.actor.runId &&
+    if ((req.actor.source === "agent_jwt" || req.actor.source === "agent_key") && req.actor.runId &&
         issue.assigneeAgentId === null && issue.assigneeUserId) {
       const run = await heartbeat.getRun(req.actor.runId);
       if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue);
@@ -14361,7 +14361,9 @@ export function issueRoutes(
         const runToStopForReassignment = await resolveActiveIssueRun(existing);
         const isHumanSelfHandoff =
           req.actor.type === "agent" &&
-          req.actor.source === "agent_jwt" &&
+          // Remote adapters use agent keys. Their run header must still match
+          // the active run's agent, company and issue below; it is not authority alone.
+          (req.actor.source === "agent_jwt" || req.actor.source === "agent_key") &&
           nextAssigneeAgentId === null &&
           typeof nextAssigneeUserId === "string" &&
           req.actor.agentId === existing.assigneeAgentId &&
