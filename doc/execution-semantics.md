@@ -30,14 +30,16 @@ An issue has at most one assignee.
 This is a hard invariant. Paperclip is single-assignee by design.
 
 A legacy agent run can hand its own task to a human without cancelling itself.
-The REST request must use the run's signed token and match the current agent,
-company, task, and active run. The assignment and requested status persist while
+The REST request must use either the run's signed token or an authenticated agent
+API key with the current run ID in `X-Paperclip-Run-Id`. Both paths must match the
+current agent, company, task, and active run; a run header alone grants no authority.
+The assignment and requested status persist while
 the current turn finishes normally. This avoids losing the handoff when workspace
 restoration takes longer than the stop timeout. The former agent no longer owns
 the task. Its later task mutations are rejected, including under the update
 transaction's task and run locks. Read and comment access follows normal policy.
 
-Board-initiated reassignments, agent API keys, native executions, and handoffs to
+Board-initiated reassignments, unmatched run identities, native executions, and handoffs to
 another agent still require the outgoing execution to stop before ownership changes.
 
 ## 3. Status Semantics
