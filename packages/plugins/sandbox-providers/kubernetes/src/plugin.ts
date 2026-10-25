@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { definePlugin } from "@paperclipai/plugin-sdk";
+import { createHash, randomBytes } from "node:crypto";
+import { definePlugin, PluginEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import type {
   PluginEnvironmentAcquireLeaseParams,
   PluginEnvironmentDestroyLeaseParams,
@@ -119,6 +119,11 @@ const readySandboxesByLease = new Set<string>();
 // faster and more reliable than waiting.
 const RESUME_READY_TIMEOUT_MS = 30_000;
 const RESUME_READY_POLL_MS = 1_000;
+
+// Provisioning (image pull, guest boot and init sidecars) belongs to acquisition,
+// not the first command's often-short execution budget. The manifest gives this
+// active operation five minutes, including observed cleanup after a failure.
+const FRESH_READY_TIMEOUT_MS = 240_000;
 
 // The workspace remote dir is the confinement root for native file sync. It is
 // recorded on the lease metadata at realizeWorkspace time (`remoteCwd`); require
@@ -446,14 +451,47 @@ const plugin = definePlugin({
       adapterEnv,
     });
 
-    const podName = await orchestrator.findPod(clients, namespace, jobName);
+    let podName: string | null = null;
+    if (isSandboxCrBackend) {
+      try {
+        await orchestrator.waitForCompletion(clients, namespace, jobName, {
+          timeoutMs: Math.min(FRESH_READY_TIMEOUT_MS, config.podActivityDeadlineSec * 1000),
+          pollMs: 2000,
+        });
+        podName = await orchestrator.findPod(clients, namespace, jobName);
+        if (!podName) throw new Error("Ready Sandbox has no backing pod");
+        readySandboxesByLease.add(jobName);
+      } catch (startupError) {
+        const allocation = { namespace, name: jobName, backend: config.backend, podName, secretName };
+        try {
+          await destroyLeaseResources(clients, allocation);
+          await waitForLeaseDeletion(clients, allocation);
+        } catch (cleanupError) {
+          // The host must retain this exact allocation for retry if cluster
+          // teardown cannot be confirmed. Do not serialize provider errors.
+          throw new PluginEnvironmentCreationCleanupError([startupError, cleanupError],
+            "Kubernetes sandbox startup failed; cleanup remains unconfirmed", {
+              providerLeaseId: jobName, observedProviderLeaseId: jobName,
+              companyId: params.companyId, environmentId: params.environmentId,
+              runId: params.runId, attemptId: jobName,
+              accountFingerprint: createHash("sha256")
+                .update(JSON.stringify({ server: kc.getCurrentCluster()?.server ?? "in-cluster", namespace }))
+                .digest("hex"),
+              labels: {},
+            });
+        }
+        throw startupError;
+      }
+    } else {
+      podName = await orchestrator.findPod(clients, namespace, jobName);
+    }
 
     const leaseMetadata: KubernetesLeaseMetadata = {
       namespace,
       jobName,
       podName,
       secretName,
-      phase: "Pending",
+      phase: isSandboxCrBackend ? "Running" : "Pending",
       backend: config.backend,
       // The pod already owns this emptyDir. Setup probes may sync runtime
       // assets using the acquired lease before realized metadata is persisted.
