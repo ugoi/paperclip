@@ -40,6 +40,17 @@ The plugin supports two backend modes, selected via the `backend` config field:
 
 **`sandbox-cr` (default):** Creates a `Sandbox` CR (`agents.x-k8s.io/v1alpha1`) whose controller provisions a long-lived pod running `sleep infinity`. paperclip-server execs individual commands into the running pod — this is the multi-command adapter-install pattern. When you `releaseLease`, the Sandbox CR is deleted and the controller tears down the pod.
 
+Fresh acquisition waits up to four minutes for the Sandbox to become Ready
+(bounded further by `podActivityDeadlineSec`). This gives image pulls, Kata guest
+boot and required init sidecars their own startup budget. A subsequent short
+command, such as the 15-second working-directory probe, retains its full budget.
+The driver's default acquisition RPC deadline is five minutes so startup-failure
+cleanup can be observed too; an explicit environment `timeoutMs` override must
+leave enough time for both. The existing two-second readiness poll runs only
+during acquisition and stops on readiness, failure or timeout. Failed startup
+deletes the allocation and confirms teardown; uncertain cleanup retains its
+exact ownership through the SDK cleanup error so the host can retry.
+
 **`job` (stable fallback):** Creates a `batch/v1` Job. The container entrypoint runs once and exits — no multi-command exec possible. Use this when you cannot install agent-sandbox, or when you need strictly stable Kubernetes APIs. Note: paperclip-server's adapter-install pattern will not work in job mode.
 
 ### Migrating from `job` to `sandbox-cr`
