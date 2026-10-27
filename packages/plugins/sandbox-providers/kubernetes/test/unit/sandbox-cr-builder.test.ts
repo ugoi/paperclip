@@ -17,6 +17,17 @@ const baseInput = {
 };
 
 describe("buildSandboxCrManifest", () => {
+  it("uses only the explicitly selected home claim and leaves other mounts ephemeral", () => {
+    const cr = buildSandboxCrManifest({ ...baseInput, homePersistentVolumeClaim: "communication-home" });
+    const spec = cr.spec.podTemplate.spec;
+    expect(spec.volumes.find((v: { name: string }) => v.name === "home")).toEqual({
+      name: "home", persistentVolumeClaim: { claimName: "communication-home" },
+    });
+    expect(spec.volumes.filter((v: { name: string }) => v.name !== "home")
+      .every((v: { emptyDir?: unknown }) => v.emptyDir !== undefined)).toBe(true);
+    expect(spec.automountServiceAccountToken).toBe(false);
+    expect(spec.securityContext.runAsNonRoot).toBe(true);
+  });
   it("returns a Sandbox CR with the correct apiVersion and kind", () => {
     const cr = buildSandboxCrManifest(baseInput);
     expect(cr.apiVersion).toBe("agents.x-k8s.io/v1alpha1");
