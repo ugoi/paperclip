@@ -29,6 +29,8 @@ export interface BuildSandboxCrManifestInput {
     limits?: { cpu?: string; memory?: string };
   };
   runtimeClassName?: string;
+  homePersistentVolumeClaim?: string;
+  hostAliases?: Array<{ ip: string; hostnames: string[] }>;
   imagePullSecrets?: string[];
 }
 
@@ -60,6 +62,7 @@ export function buildSandboxCrManifest(
           // they never call the Kubernetes API, so mounting an SA token is
           // unnecessary attack surface.
           automountServiceAccountToken: false,
+          ...(input.hostAliases?.length ? { hostAliases: input.hostAliases } : {}),
           // Sandbox controller requires restartPolicy: Always so the pod
           // stays running between exec calls.
           restartPolicy: "Always",
@@ -130,7 +133,9 @@ export function buildSandboxCrManifest(
           ],
           volumes: [
             { name: "workspace", emptyDir: { sizeLimit: "8Gi" } },
-            { name: "home", emptyDir: { sizeLimit: "1Gi" } },
+            input.homePersistentVolumeClaim
+              ? { name: "home", persistentVolumeClaim: { claimName: input.homePersistentVolumeClaim } }
+              : { name: "home", emptyDir: { sizeLimit: "1Gi" } },
             { name: "cache", emptyDir: { sizeLimit: "1Gi" } },
             { name: "tmp", emptyDir: { sizeLimit: "2Gi" } },
           ],

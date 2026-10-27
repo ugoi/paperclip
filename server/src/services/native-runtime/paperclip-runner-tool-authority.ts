@@ -3,6 +3,7 @@ import { nativeRunKeyScope, nativeSkillTestToolAllowed, assertNativeSkillTestToo
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
 import { requiredQualityReviewSchema } from "@paperclipai/shared";
 import { priorRecoveryApiReceipt } from "../recovery-effect-receipts.js";
+import { isObserverAgent } from "../observer-agent-policy.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { caseHandoffService } from "../case-handoffs.js";
 import { caseIdForApiCapture, createNativeCaseSchema, executeNativeCaseTool, NATIVE_CASE_OPERATIONS } from "./native-case-tools.js";
@@ -310,6 +311,7 @@ export class PaperclipRunnerToolAuthority {
   constructor(readonly db: Db, readonly binding: Binding) {}
 
   definitions(): Array<Record<string, unknown>> {
+    if (isObserverAgent(this.binding.agentId)) return [];
     if (this.binding.nativeReview) {
       // Scope Paperclip control-plane actions. Provider file and shell access
       // still follow the configured agent/environment policy, including tests.
@@ -528,6 +530,9 @@ export class PaperclipRunnerToolAuthority {
     callId: string;
     arguments: unknown;
   }): Promise<unknown> {
+    if (isObserverAgent(this.binding.agentId)) {
+      throw forbidden("Observer agents use only their capability broker");
+    }
     if ((call.tool === "handoff_case" || call.tool === "create_case") && !this.binding.nativeReview) {
       if (this.binding.workMode && this.binding.workMode !== "standard") throw forbidden("Case tools require standard work mode");
       const create = call.tool === "create_case" ? createNativeCaseSchema.parse(call.arguments) : null;
