@@ -28,6 +28,10 @@ export const kubernetesProviderConfigSchema = z
       .optional(),
 
     runtimeClassName: z.string().optional(),
+    homePersistentVolumeClaim: z.string().regex(/^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$/).optional(),
+    hostAliases: z.array(z.object({ ip: z.string().ip({version:"v4"}),
+      hostnames: z.array(z.string().regex(/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/)).min(1).max(8),
+    }).strict()).max(8).optional(),
     serviceAccountAnnotations: z.record(z.string()).default({}),
 
     jobTtlSecondsAfterFinished: z.number().int().nonnegative().default(900),
@@ -66,6 +70,9 @@ export const kubernetesProviderConfigSchema = z
      *   installed, or when you need stable (non-alpha) k8s APIs.
      */
     backend: z.enum(["sandbox-cr", "job"]).default("sandbox-cr"),
+  })
+  .refine((cfg) => !cfg.homePersistentVolumeClaim || cfg.backend === "sandbox-cr", {
+    message: "Persistent agent home requires the sandbox-cr backend",
   })
   .refine(
     (cfg) => cfg.inCluster || cfg.kubeconfig,

@@ -88,6 +88,15 @@ const manifest: PaperclipPluginManifestV1 = {
             description:
               "Annotations applied to the per-tenant ServiceAccount (e.g. `eks.amazonaws.com/role-arn` for IRSA).",
           },
+          homePersistentVolumeClaim: {
+            type: "string",
+            description: "Existing PVC for this environment's private agent home (sandbox-cr only). Use a dedicated environment and one concurrent run; the provider never creates or deletes this claim.",
+          },
+          hostAliases: {
+            type: "array",
+            description: "Operator-owned static host entries for environments that deny DNS egress.",
+            items: { type: "object", properties: { ip: { type: "string" }, hostnames: { type: "array", items: { type: "string" } } }, required: ["ip", "hostnames"], additionalProperties: false },
+          },
           jobTtlSecondsAfterFinished: {
             type: "integer",
             minimum: 0,

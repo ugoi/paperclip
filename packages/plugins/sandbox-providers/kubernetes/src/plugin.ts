@@ -386,6 +386,8 @@ const plugin = definePlugin({
           labels,
           resources: config.defaultResources ?? {},
           runtimeClassName: config.runtimeClassName,
+          homePersistentVolumeClaim: config.homePersistentVolumeClaim,
+          hostAliases: config.hostAliases,
           imagePullSecrets: config.imagePullSecrets,
         })
       : buildJobManifest({
