@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { inspect } from "node:util";
 import { dirname, join } from "node:path";
 import {
+  environmentLeases,
   heartbeatRuns,
   environmentLeases,
   heartbeatRunEvents,
@@ -6415,6 +6416,7 @@ function leaseDb(
   runnerProfileJson: Record<string, unknown> = {},
   runStatus = "running",
   priorAccountingEvents: PrpEvent[] = [],
+  environmentLeaseRows: Array<{ provider: string; providerLeaseId: string }> = [],
 ): Db {
   const coordinator: LeaseCoordinator = {
     runId: boundExecution.binding.runId,
@@ -6477,6 +6479,8 @@ function leaseDb(
                     checkoutRunId: null,
                   },
                 ]
+              : table === environmentLeases
+                ? environmentLeaseRows
               : table === heartbeatRunEvents
                 ? priorAccountingEvents.map((event, seq) => ({ seq, eventType: event.eventType, sourceSeq: event.sourceSeq, payload: { prpEvent: event } }))
                 : [];
@@ -6499,6 +6503,7 @@ function leaseDb(
     },
   });
   const tx = {
+    transaction: async (operation: (transaction: Db) => Promise<unknown>) => operation(tx as unknown as Db),
     insert,
     execute: async () => [],
     select,
@@ -6628,6 +6633,28 @@ function cancellationDb(options?: {
     tx,
   };
 }
+
+describe("native SSH and sandbox cleanup scopes", () => {
+  it.each(["ssh", "sandbox"] as const)("binds %s cleanup to the remote resource before opening a session", async transport => {
+    const remoteLease = { provider: transport === "ssh" ? "ssh" : "kubernetes", providerLeaseId: `${transport}://fixture/task-root` };
+    const reachedAdmission = new Error("cleanup scope inspected before provider execution");
+    state.execute.mockReset().mockImplementationOnce(async options => {
+      expect(options.remoteCleanupScope).toBe(JSON.stringify([remoteLease.provider, remoteLease.providerLeaseId]));
+      throw reachedAdmission;
+    });
+    const target = transport === "ssh"
+      ? { kind: "remote" as const, transport, leaseId: "remote-lease", remoteCwd: "/workspace",
+          spec: { host: "fixture.invalid", port: 22, username: "fixture", remoteWorkspacePath: "/workspace",
+            remoteCwd: "/workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true } }
+      : { kind: "remote" as const, transport, leaseId: "remote-lease", remoteCwd: "/workspace",
+          providerKey: remoteLease.provider, runner: { execute: vi.fn() } };
+    await expect(executePaperclipNativeSession({
+      db: leaseDb(execution, {}, {}, [], {}, "running", [], [remoteLease]), execution,
+      runnerInstanceId: "cleanup-scope-runner", runnerExecutionTarget: target,
+    })).rejects.toBe(reachedAdmission);
+    expect(state.execute).toHaveBeenCalledOnce();
+  });
+});
 
 describe("native startup cancellation fence", () => {
   it.each(["current", "stale"] as const)("reattaches a %s remote recovery claim only to deliver an existing Stop", async mode => {
