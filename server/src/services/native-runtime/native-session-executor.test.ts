@@ -5915,10 +5915,12 @@ function cancellationDb(options?: {
 describe("native SSH and sandbox cleanup scopes", () => {
   it.each(["ssh", "sandbox"] as const)("binds %s cleanup to the remote resource before opening a session", async transport => {
     const remoteLease = { provider: transport === "ssh" ? "ssh" : "kubernetes", providerLeaseId: `${transport}://fixture/task-root` };
-    const reachedAdmission = new Error("cleanup scope inspected before provider execution");
     state.execute.mockReset().mockImplementationOnce(async options => {
       expect(options.remoteCleanupScope).toBe(JSON.stringify([remoteLease.provider, remoteLease.providerLeaseId]));
-      throw reachedAdmission;
+      return { result: { summary: "Remote scope verified" }, terminal: { runTerminalState: "succeeded" },
+        turnId: "scope-turn", normalizedSessionId: "scope-session", providerSessionId: null,
+        driverKind: "codex_app_server", driverVersion: "1", nativeEventCount: 0,
+        highestContiguousSourceSeq: 0, usage: null };
     });
     const target = transport === "ssh"
       ? { kind: "remote" as const, transport, leaseId: "remote-lease", remoteCwd: "/workspace",
@@ -5926,10 +5928,10 @@ describe("native SSH and sandbox cleanup scopes", () => {
             remoteCwd: "/workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true } }
       : { kind: "remote" as const, transport, leaseId: "remote-lease", remoteCwd: "/workspace",
           providerKey: remoteLease.provider, runner: { execute: vi.fn() } };
-    await expect(executePaperclipNativeSession({
+    await executePaperclipNativeSession({
       db: leaseDb(execution, {}, {}, [], {}, "running", [], [remoteLease]), execution,
       runnerInstanceId: "cleanup-scope-runner", runnerExecutionTarget: target,
-    })).rejects.toBe(reachedAdmission);
+    });
     expect(state.execute).toHaveBeenCalledOnce();
   });
 });
