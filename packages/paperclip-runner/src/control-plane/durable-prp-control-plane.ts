@@ -290,6 +290,10 @@ export interface RunnerProcessHandle {
     kill(signal?: NodeJS.Signals | number): boolean;
   };
   completion: Promise<RunnerProcessResult>;
+  /** Remote staging and exact process-identity publication, before PRP admission. */
+  launchReady?: Promise<void>;
+  /** Prevent a pending launch; an already-dispatched process remains owned until completion. */
+  cancelPendingLaunch?(): void;
   processGroupId?: number | null;
   startedAt?: string;
   isExitConfirmed?(): boolean;

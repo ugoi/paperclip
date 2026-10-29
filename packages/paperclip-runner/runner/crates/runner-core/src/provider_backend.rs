@@ -557,13 +557,14 @@ fn admit_terminal_tool_authority(
         "paperclip_finish" => {
             matches!(disposition.as_str(), "done" | "needs_review")
                 || (disposition == "yielded"
-                    && matches!(
-                        input
-                            .get("continuation")
-                            .and_then(|continuation| continuation.get("kind"))
-                            .and_then(Value::as_str),
-                        Some("response_wake" | "monitor" | "case_handoff")
-                    ))
+                    && (input.get("continuation").map_or(true, Value::is_null)
+                        || matches!(
+                            input
+                                .get("continuation")
+                                .and_then(|continuation| continuation.get("kind"))
+                                .and_then(Value::as_str),
+                            Some("response_wake" | "monitor" | "case_handoff" | "same_agent")
+                        )))
         }
         "paperclip_block" => disposition == "blocked",
         _ => false,
@@ -5091,6 +5092,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -5311,7 +5313,37 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tool_authority_rejects_an_unbound_yield() {
+    fn terminal_tool_authority_preserves_controller_resolved_workspace_yields() {
+        for continuation in [
+            None,
+            Some(Value::Null),
+            Some(json!({
+                "kind": "same_agent",
+                "summary": "Continue the prepared repository.",
+                "idempotencyKey": "repository:task:receipt:run"
+            })),
+        ] {
+            let mut state = opencode_result_state();
+            let mut result = valid_opencode_result();
+            result["reportedWorkDisposition"] = json!("yielded");
+            if let Some(value) = continuation {
+                result["continuation"] = value;
+            }
+            admit_terminal_tool_authority(&mut state, "paperclip_finish", &result, false).unwrap();
+            assert_eq!(
+                state.active_provider_result_disposition.as_deref(),
+                Some("yielded")
+            );
+            assert_eq!(
+                state.active_provider_result_fingerprint.as_deref(),
+                Some(semantic_value_digest(&result).as_str())
+            );
+            assert!(state.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn terminal_tool_authority_does_not_record_a_controller_rejected_yield() {
         let mut state = opencode_result_state();
         let mut result = valid_opencode_result();
         result["reportedWorkDisposition"] = json!("yielded");
@@ -5321,9 +5353,10 @@ mod tests {
             "idempotencyKey": "same-agent-1"
         });
 
-        assert!(
-            admit_terminal_tool_authority(&mut state, "paperclip_finish", &result, false,).is_err()
-        );
+        admit_terminal_tool_authority(&mut state, "paperclip_finish", &result, true).unwrap();
+        assert!(state.active_provider_result_fingerprint.is_none());
+        assert!(state.active_provider_result_disposition.is_none());
+        assert!(state.validate().is_ok());
     }
 
     #[test]
@@ -5473,6 +5506,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -5565,6 +5599,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -5619,6 +5654,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -5663,6 +5699,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -5756,6 +5793,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -5824,6 +5862,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -5875,6 +5914,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -6000,6 +6040,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -6113,6 +6154,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -6171,6 +6213,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -6314,6 +6357,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -6356,6 +6400,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -6395,6 +6440,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
@@ -6473,6 +6519,7 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_host_full_access: false,
                 read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,

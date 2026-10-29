@@ -13,6 +13,14 @@ import { instanceSettingsService } from "../instance-settings.js";
 import { buildNativeExecutionInput } from "../native-runtime/native-execution-input.js";
 import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.test-fixture.js";
 import { selectHeartbeatEnvironment, type HeartbeatEnvironmentSelectionInput } from "./environment-selection.js";
+import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
+
+const restoration = vi.hoisted(() => ({ removed: false }));
+vi.mock("../git-workspace-restoration.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../git-workspace-restoration.js")>();
+  return { ...actual, readGitCacheExpiration: (workspace: Parameters<typeof actual.readGitCacheExpiration>[0]) =>
+    restoration.removed ? { workspaceRemoved: true } as ReturnType<typeof actual.readGitCacheExpiration> : actual.readGitCacheExpiration(workspace) };
+});
 
 const support = await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)("heartbeat environment selection boundary", () => {
@@ -130,6 +138,56 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     expect(result.requestedReusableExecutionWorkspaceConfig).toBeNull();
   });
 
+  describe("workspaces removed by git cache expiration", () => {
+    async function expired() {
+      const f = await fixture();
+      const saved = await f.workspace();
+      await executionWorkspaceService(db).update(saved.id, { status: "archived" });
+      f.input.task.issueRef!.executionWorkspaceId = saved.id;
+      f.input.task.issueRef!.executionWorkspacePreference = "reuse_existing";
+      await db.update(issues).set({ executionWorkspaceId: saved.id, executionWorkspacePreference: "reuse_existing" }).where(eq(issues.id, f.issue.id));
+      restoration.removed = true;
+      const svc = executionWorkspaceService(db);
+      f.input.services.executionWorkspacesSvc = svc;
+      return { ...f, saved, svc };
+    }
+
+    it("reopens the issue's expired workspace before the run binds it", async () => {
+      const { input, issue, saved, svc } = await expired();
+      const reopen = vi.spyOn(svc, "reopenClosedIsolatedExecutionWorkspaceForIssue").mockImplementation(async () => {
+        await executionWorkspaceService(db).update(saved.id, { status: "active" });
+        return { ok: true, reopened: true, workspace: (await svc.getStoredById(issue.companyId, saved.id))!, generation: 4 };
+      });
+      const clear = vi.spyOn(svc, "clearReopenPendingConsumptionForUnconsumedReopen").mockResolvedValue({ cleared: true });
+      try {
+        const result = await selectHeartbeatEnvironment(db, input);
+        expect(reopen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: saved.id,
+          issue: { id: issue.id, companyId: issue.companyId, projectId: issue.projectId },
+          authorizationActor: expect.objectContaining({ type: "agent", agentId: input.agent.id, runId: input.run.id }) }));
+        expect(clear).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: saved.id, expectedGeneration: 4 }));
+        expect(result.reusableExistingExecutionWorkspace).toMatchObject({ id: saved.id, status: "active" });
+      } finally { restoration.removed = false; }
+    });
+
+    it("fails the run instead of binding a new workspace when the restore fails", async () => {
+      const { input, svc } = await expired();
+      vi.spyOn(svc, "reopenClosedIsolatedExecutionWorkspaceForIssue")
+        .mockResolvedValue({ ok: false, code: "rebuild_failed", message: "Workspace restore failed" });
+      try {
+        await expect(selectHeartbeatEnvironment(db, input)).rejects.toThrow("Workspace restore failed");
+      } finally { restoration.removed = false; }
+    });
+
+    it("leaves a workspace archived for other reasons alone", async () => {
+      const { input, svc } = await expired();
+      restoration.removed = false;
+      const reopen = vi.spyOn(svc, "reopenClosedIsolatedExecutionWorkspaceForIssue");
+      const result = await selectHeartbeatEnvironment(db, input);
+      expect(reopen).not.toHaveBeenCalled();
+      expect(result.reusableExistingExecutionWorkspace).toBeNull();
+    });
+  });
+
   it.each(["muse", "openai_dot", "grok_bot"] as const)("keeps %s managed placement without adopting the task's selected workspace", async provider => {
     const { input, issue, workspace } = await fixture();
     const source = await workspace();
@@ -156,6 +214,35 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
       expect(input.services.findSharedWorkspaceHolder).not.toHaveBeenCalled();
       expect(input.task.issueRef!.executionWorkspaceId).toBe(source.id);
     } finally { read.mockRestore(); select.mockRestore(); }
+  });
+
+  it.each([false, true])("preserves a repository-free SSH task directory across later admissions (fresh attempt: %s)", async freshAttempt => {
+    const { input, issue } = await fixture();
+    const cwd = await materializeIsolatedTaskDirectory({ companyId: input.agent.companyId, issueId: issue.id,
+      ...(freshAttempt ? { attemptId: randomUUID() } : {}) });
+    const saved = await executionWorkspaceService(db).create({ companyId: input.agent.companyId,
+      sourceIssueId: issue.id, name: "Plain SSH task", mode: "isolated_workspace", strategyType: "project_primary", cwd });
+    if (!saved) throw new Error("Task directory fixture was not created");
+    const [ssh] = await db.insert(environments).values({ name: `Native SSH ${randomUUID()}`, driver: "ssh", status: "active",
+      config: { host: "fixture.invalid", username: "fixture", remoteWorkspacePath: "/workspace" } }).returning();
+    input.agent.defaultEnvironmentId = ssh.id;
+    input.task.issueRef!.executionWorkspaceId = saved.id;
+    input.task.issueRef!.executionWorkspacePreference = "reuse_existing";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    await db.update(issues).set({ executionWorkspaceId: saved.id, executionWorkspacePreference: "reuse_existing" })
+      .where(eq(issues.id, issue.id));
+    for (let admission = 0; admission < 2; admission++) {
+      const [nextRun] = await db.insert(heartbeatRuns).values({ companyId: input.agent.companyId,
+        agentId: input.agent.id, issueId: issue.id, scopeKind: "issue", status: "running", runtimeMode: "legacy" }).returning();
+      input.run = nextRun;
+      const result = await selectHeartbeatEnvironment(db, input);
+      expect(result.selectedEnvironmentForConfig?.driver).toBe("ssh");
+      expect(result.reusableExistingExecutionWorkspace).toMatchObject({ id: saved.id, cwd, strategyType: "project_primary" });
+      expect(result.explicitTaskDirectory).toBe(true);
+      expect(result.useIsolatedTaskDirectory).toBe(false);
+    }
+    input.config.config.workspaceStrategy = { type: "git_worktree", existingBranch: "main" };
+    expect((await selectHeartbeatEnvironment(db, input)).explicitTaskDirectory).toBe(false);
   });
 
   it("uses the low-trust task sandbox even when workspace feature gates hide issue settings", async () => {

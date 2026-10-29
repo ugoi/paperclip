@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Issue } from "@paperclipai/shared";
 import { includeIssueHierarchyContext, loadIssueHierarchyChildren } from "./issue-hierarchy-context";
 
-const task = (id: string, parentId: string | null = null) => ({ id, parentId, companyId: "company" } as Issue);
+const task = (id: string, parentId: string | null = null, status = "todo") => ({ id, parentId, status, companyId: "company" } as Issue);
 
 describe("task hierarchy context", () => {
   it("retains ancestors and descendants without promoting siblings or orphans", () => {
@@ -16,6 +16,29 @@ describe("task hierarchy context", () => {
   it("deduplicates matches and terminates cycles", () => {
     const match = task("human", "parent");
     expect(includeIssueHierarchyContext([match], [match, task("parent", "human")]).map((issue) => issue.id)).toEqual(["human", "parent"]);
+  });
+
+  it("keeps selected-status descendants without restoring completed tasks or hiding active grandchildren", () => {
+    const match = task("human", null, "in_progress");
+    const context = [task("grandchild", "completed"), task("completed", "human", "done"), task("pending", "human"), task("cancelled", "human", "cancelled")];
+    expect(includeIssueHierarchyContext([match], context, ["in_progress", "todo"]).map((issue) => issue.id)).toEqual([
+      "human", "pending", "grandchild",
+    ]);
+  });
+
+  it("preserves matching ancestor context across excluded ancestors without admitting their other children", () => {
+    const match = task("human", "completed-parent");
+    const context = [task("completed-parent", "active-ancestor", "done"), task("active-ancestor", null, "in_progress"), task("sibling", "completed-parent")];
+    expect(includeIssueHierarchyContext([match], context, ["in_progress", "todo"]).map((issue) => issue.id)).toEqual([
+      "human", "active-ancestor",
+    ]);
+  });
+
+  it("retains all hierarchy statuses when the status filter is cleared", () => {
+    const match = task("human", "completed-parent");
+    expect(includeIssueHierarchyContext([match], [task("completed-parent", null, "done"), task("completed-child", "human", "done")], []).map((issue) => issue.id)).toEqual([
+      "human", "completed-parent", "completed-child",
+    ]);
   });
 });
 

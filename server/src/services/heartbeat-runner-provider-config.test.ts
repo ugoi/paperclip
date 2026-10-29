@@ -517,3 +517,15 @@ describe("Paperclip Runner native provider configuration", () => {
     ).toMatchObject({ provider: "acpx", acpxAgent: "pi", model: "pi-model" });
   });
 });
+
+
+describe("explicit trusted SSH Codex config", () => {
+  it("projects the manager-selected permission and scoped home into native execution", () => {
+    expect(resolvePaperclipRunnerNativeProviderInput({ backend: "codex_app_server", adapterConfig: { provider: "codex", homeMode: "preconfigured", codexSandboxMode: "danger-full-access", remoteCodexHome: "/Users/operator/worker-home" } })).toMatchObject({ provider: "codex", homeMode: "preconfigured", codexSandboxMode: "danger-full-access", remoteCodexHome: "/Users/operator/worker-home" });
+  });
+  it("rejects unsupported policy and home selection outside preconfigured Codex", () => {
+    for (const adapterConfig of [{ provider: "codex", codexSandboxMode: "danger-full-access" }, { provider: "codex", homeMode: "preconfigured", codexSandboxMode: "automatic" }, { provider: "codex", homeMode: "preconfigured", remoteCodexHome: "relative" }]) {
+      expect(() => resolvePaperclipRunnerNativeProviderInput({ backend: "codex_app_server", adapterConfig })).toThrow();
+    }
+  });
+});

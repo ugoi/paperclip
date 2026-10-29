@@ -688,3 +688,13 @@ describe("Claude effort and master home-mode compatibility", () => {
     expect(JSON.stringify(buildNativeModelEnvelope(value))).not.toContain("claudeEffort");
   });
 });
+
+
+it("persists explicit trusted-host permissions and remote Codex home", () => {
+  const input = buildNativeExecutionInput({
+    companyId: "company", runId: "run", agentId: "agent", issue: { id: "issue", identifier: "MAC-1", title: "Mac probe", description: null, workMode: "standard" }, taskPrompt: "Probe permissions",
+    workspace: { id: "workspace", cwd: "/workspace", repoUrl: null, repoRef: null, branchName: null }, normalizedSessionId: null, provider: "codex", homeMode: "preconfigured", codexSandboxMode: "danger-full-access", remoteCodexHome: "/Users/operator/worker-home",
+    completionContract: { id: "contract", sha256: "a".repeat(64), schemaVersion: "paperclip.run-result.v1", contract: { revision: "1", objective: "Probe", criteria: [{ id: "output", requirement: "Proof" }] } }, runtimeContext: nativeRuntimeContextFixture(),
+  });
+  expect(input.provider).toMatchObject({ sandboxMode: "danger-full-access", remoteCodexHome: "/Users/operator/worker-home" });
+});

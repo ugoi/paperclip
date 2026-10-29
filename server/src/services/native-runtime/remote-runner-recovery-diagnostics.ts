@@ -1,3 +1,5 @@
+import { remoteRecoveryGenerationCheck, REMOTE_RECOVERY_LIVENESS_CHECK_SCRIPT } from "./remote-runner-process-probe.js";
+
 export const REMOTE_RUNNER_RECOVERY_ERROR_CODE = "runner_remote_process_identity_unavailable";
 
 const stages = ["runner_state", "identity_marker", "process_verification"] as const;
@@ -62,6 +64,10 @@ export function readRemoteRunnerRecoveryError(error: unknown): RemoteRunnerRecov
 export const REMOTE_RECOVERY_MARKER_READ_SCRIPT =
   'test ! -L "$1" || exit 32; test -f "$1" || exit 31; cat -- "$1" || exit 33';
 
+const REMOTE_RECOVERY_ZOMBIE_CHECK_SCRIPT = remoteRecoveryGenerationCheck(true);
+
+export const REMOTE_RECOVERY_PROCESS_FINGERPRINT_CHECK_SCRIPT = remoteRecoveryGenerationCheck(false);
+
 export const REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT = [
   "set -eu",
   "identity_path=$1; expected_nonce=$2; expected_runner_id=$3; expected_pid=$4",
@@ -69,8 +75,8 @@ export const REMOTE_RECOVERY_PROCESS_CHECK_SCRIPT = [
   'test -f "$identity_path" || exit 41',
   '{ IFS= read -r nonce; IFS= read -r pid; IFS= read -r started_at; IFS= read -r runner_id; } < "$identity_path" || exit 43',
   'test "$nonce" = "$expected_nonce" && test "$runner_id" = "$expected_runner_id" && test "$pid" = "$expected_pid" && test -n "$started_at" || exit 44',
-  'kill -0 "$pid" 2>/dev/null || exit 45',
-  'if test -r "/proc/$pid/cmdline"; then command_line=$(tr "\\000" "\\n" < "/proc/$pid/cmdline"); printf "%s\\n" "$command_line" | grep -Fqx -- "--runner-id" || exit 44; printf "%s\\n" "$command_line" | grep -Fqx -- "$expected_runner_id" || exit 44; fi',
+  REMOTE_RECOVERY_LIVENESS_CHECK_SCRIPT,
+  'if test -r "/proc/$pid/cmdline"; then if command_line=$(tr "\\000" "\\n" < "/proc/$pid/cmdline"); then :; else ' + REMOTE_RECOVERY_LIVENESS_CHECK_SCRIPT + '; exit 46; fi; if ! printf "%s\\n" "$command_line" | grep -Fqx -- "--runner-id" || ! printf "%s\\n" "$command_line" | grep -Fqx -- "$expected_runner_id"; then ' + REMOTE_RECOVERY_LIVENESS_CHECK_SCRIPT + '; test -n "${5:-}" || exit 44; ' + REMOTE_RECOVERY_ZOMBIE_CHECK_SCRIPT + '; exit 44; fi; fi',
 ].join("; ");
 
 export function remoteRecoveryProbeReason(stage: RemoteRunnerRecoveryDiagnostic["stage"], exitCode: number | null, timedOut: boolean): RemoteRunnerRecoveryDiagnostic["reason"] {

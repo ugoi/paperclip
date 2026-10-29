@@ -21,6 +21,7 @@ const manifest: PaperclipPluginManifestV1 = {
       driverKey: "kubernetes",
       kind: "sandbox_provider",
       displayName: "Kubernetes",
+      defaultAcquireTimeoutMs: 300_000,
       description:
         "Dispatches agent runs in per-tenant Kubernetes namespaces. Default backend (sandbox-cr, alpha) uses kubernetes-sigs/agent-sandbox for multi-command exec; fallback backend (job) uses stable batch/v1 Job for clusters without agent-sandbox installed.",
       configSchema: {
@@ -86,6 +87,15 @@ const manifest: PaperclipPluginManifestV1 = {
             additionalProperties: { type: "string" },
             description:
               "Annotations applied to the per-tenant ServiceAccount (e.g. `eks.amazonaws.com/role-arn` for IRSA).",
+          },
+          homePersistentVolumeClaim: {
+            type: "string",
+            description: "Existing PVC for this environment's private agent home (sandbox-cr only). Use a dedicated environment and one concurrent run; the provider never creates or deletes this claim.",
+          },
+          hostAliases: {
+            type: "array",
+            description: "Operator-owned static host entries for environments that deny DNS egress.",
+            items: { type: "object", properties: { ip: { type: "string" }, hostnames: { type: "array", items: { type: "string" } } }, required: ["ip", "hostnames"], additionalProperties: false },
           },
           jobTtlSecondsAfterFinished: {
             type: "integer",

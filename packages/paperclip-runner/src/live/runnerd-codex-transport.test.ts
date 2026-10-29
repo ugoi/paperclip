@@ -1509,6 +1509,37 @@ it("refuses session reuse when asynchronous process containment fails", async ()
   })).rejects.toThrow("remote process still alive");
 });
 
+it("records execution stop only after settled provider, route, checkpoint and process exit", async () => {
+  const steps: string[] = [];
+  let exited = false;
+  await runnerdRecoveryInternals.releaseRunnerProcessOwnership({
+    runnerSettled: true,
+    release: () => { steps.push("route"); },
+    checkpoint: () => { steps.push("checkpoint"); },
+    forceKill: async () => { await new Promise<void>(resolve => setImmediate(resolve)); exited = true; steps.push("exit"); },
+    processExitConfirmed: () => exited,
+    onExecutionStopped: () => { steps.push("receipt"); },
+  });
+  expect(steps).toEqual(["route", "checkpoint", "exit", "receipt"]);
+});
+
+it.each(["unsettled", "exit_unknown", "route_failed", "checkpoint_failed", "containment_failed", "receipt_failed"] as const)(
+  "retains missing termination proof when %s", async failure => {
+    let acknowledged = false;
+    const result = runnerdRecoveryInternals.releaseRunnerProcessOwnership({
+      runnerSettled: failure !== "unsettled",
+      release: () => { if (failure === "route_failed") throw Error(failure); },
+      checkpoint: () => { if (failure === "checkpoint_failed") throw Error(failure); },
+      forceKill: () => { if (failure === "containment_failed") throw Error(failure); },
+      processExitConfirmed: () => failure !== "exit_unknown",
+      onExecutionStopped: () => { if (failure === "receipt_failed") throw Error(failure); acknowledged = true; },
+    });
+    if (failure.endsWith("failed")) await expect(result).rejects.toThrow(failure);
+    else await result;
+    expect(acknowledged).toBe(false);
+  },
+);
+
 it("waits for the exact durable suspension command behind prior close work", async () => {
   const commands = [
     {
@@ -1653,9 +1684,11 @@ it.each([
     const { preparationDeadline, closeDeadline } = runnerdRecoveryInternals.runnerCloseDeadlines(
       Date.now(), runnerdRecoveryInternals.runnerCloseGraceMs(options),
     );
-    // The retained restart failure spent 5.2s stopping idle Pi before its
-    // remote drain acknowledgement crossed the next command round trip.
-    await vi.advanceTimersByTimeAsync(5_200);
+    // Native Pi allows thirty seconds for snapshot cleanup and five seconds
+    // for its lifetime fence before the drain acknowledgement round trip.
+    const stopMs = options.provider === "acpx" && options.acpxAgent === "pi"
+      && options.closeGraceMs === undefined ? 35_200 : 5_200;
+    await vi.advanceTimersByTimeAsync(stopMs);
     const commands: { commandId: string; status: string; result?: unknown }[] = [];
     const result = runnerdRecoveryInternals.awaitProviderDrainBarrier({
       readProviderState: () => null,
@@ -1675,7 +1708,7 @@ it.each([
     await vi.advanceTimersByTimeAsync(5_000);
     expect(await result).toBe(drained);
     expect(closeDeadline - preparationDeadline).toBeLessThanOrEqual(2_500);
-    expect(runnerdRecoveryInternals.runnerCloseGraceMs(options)).toBeLessThanOrEqual(15_000);
+    expect(runnerdRecoveryInternals.runnerCloseGraceMs(options)).toBeLessThanOrEqual(45_000);
   } finally { vi.useRealTimers(); }
 });
 
@@ -1892,13 +1925,17 @@ it.each([false, true])("binds a vendored source server to its pnpm dependency ro
     expect(runnerdLaunchProfileInternals.acpxProviderPackageAuthority(
       join(server, "dist/vendor/paperclip-runner/cli/acpx-runtime-sidecar.cjs"),
     )).toEqual({ root: selfRooted ? server : workspace, manifest: join(server, "package.json") });
+    expect(runnerdLaunchProfileInternals.acpxProviderPackageAuthority(
+      join(server, "dist/vendor/paperclip-runner/cli/acpx-runtime-sidecar.cjs"), workspace, "pi",
+    )).toEqual({ root: server, manifest: join(server, "package.json") });
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
-it.each(["source", "scoped-npm", "deployment"])(
-  "admits the controller-selected Copilot package authority in a %s layout",
-  async (layout) => {
+it.each((["copilot", "pi"] as const).flatMap(agent =>
+  ["source", "scoped-npm", "deployment"].map(layout => ({ agent, layout }))))(
+  "admits the controller-selected $agent package authority in a $layout layout",
+  async ({ agent, layout }) => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "copilot-package-authority-")));
     const runnerRoot = layout === "source"
       ? join(directory, "packages/paperclip-runner")
@@ -1909,13 +1946,13 @@ it.each(["source", "scoped-npm", "deployment"])(
     await writeFile(join(runnerRoot, "package.json"), JSON.stringify({ name: "@paperclipai/paperclip-runner" }));
     try {
       const authority = runnerdLaunchProfileInternals.acpxProviderPackageAuthority(
-        join(runnerRoot, "dist/cli/acpx-runtime-sidecar.cjs"), runnerRoot, "copilot",
+        join(runnerRoot, "dist/cli/acpx-runtime-sidecar.cjs"), runnerRoot, agent,
       );
       expect(authority).toEqual({ root: runnerRoot, manifest: join(runnerRoot, "package.json") });
       vi.stubEnv("PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT", authority.root);
       vi.stubEnv("PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST", authority.manifest);
-      expect(resolveRunnerProviderAssetsRoot("file:///proc/self/fd/18", "copilot"))
-        .toBe(join(runnerRoot, "provider-assets/copilot"));
+      expect(resolveRunnerProviderAssetsRoot("file:///proc/self/fd/18", agent))
+        .toBe(join(runnerRoot, `provider-assets/${agent}`));
     } finally {
       vi.unstubAllEnvs();
       await rm(directory, { recursive: true, force: true });
@@ -3550,6 +3587,30 @@ it.each(["settled", "late", "late-release-error"] as const)("retires owned start
     release(); await Promise.allSettled([opening, closing]); preparation.mockRestore();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+it("preserves the remote preconfigured account through setup probe launch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runnerd-preconfigured-probe-"));
+  const launch = vi.fn((_spec: durableControlPlane.RunnerProcessLaunchSpec) => { throw new Error("fixture launch boundary"); });
+  try {
+    await expect(probeNativeRunnerEnvironment({
+      runtimeDirectory: root, provider: "codex", model: "gpt-test", timeoutMs: 1_000,
+      environment: { HOME: "/remote/account", CODEX_HOME: "/remote/account/.codex", PATH: process.env.PATH },
+      workingDirectory: "/remote/probe/workspace",
+      transportOptions: {
+        homeMode: "preconfigured", runnerFilesystemRoot: "/remote/probe",
+        sourceCodexHome: "", runnerBinary: resolve(import.meta.dirname, "../../package.json"),
+        codexCommand: "/remote/bin/codex", runnerProcessLauncher: launch,
+        controlPlaneRegistration: async () => ({ connectUrl: "ws://127.0.0.1:1", release: async () => {} }),
+      },
+    })).rejects.toThrow("fixture launch boundary");
+    expect(launch).toHaveBeenCalledOnce();
+    const environment = launch.mock.calls[0]![0].environment;
+    expect(environment.HOME).toBe("/remote/account");
+    expect(environment.CODEX_HOME).toBe("/remote/account/.codex");
+    expect(environment.PAPERCLIP_RUNNER_HOME_MODE).toBe("preconfigured");
+    await expect(stat(join(root, "codex-home"))).rejects.toMatchObject({ code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 it("does not certify probe cleanup while owned credential preparation is unconfirmed", async () => {
@@ -9097,25 +9158,51 @@ it("aborts startup promptly on close while allowing the owned cleanup command to
     await drain;
   } finally { vi.useRealTimers(); }
 });
-it("launches and closes native Codex without materializing or editing the preconfigured home", async () => {
+it.each(["ordinary", "trusted-host", "trusted-host-plan"] as const)("launches and closes native Codex without materializing or editing the preconfigured home (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "runner-preconfigured-launch-"));
   const home = join(root, "user-home");
   const codexHome = join(home, ".codex");
   const stateDirectory = join(root, "session");
+  const calls = join(root, "calls.jsonl");
+  const trustedHostFullAccess = mode !== "ordinary";
+  const readOnly = mode === "trusted-host-plan";
   await mkdir(codexHome, { recursive: true });
   await mkdir(stateDirectory);
   const config = 'approval_policy = "never"\n';
   const auth = '{"user_owned":true}';
   await writeFile(join(codexHome, "config.toml"), config);
   await writeFile(join(codexHome, "auth.json"), auth);
+  const stopped: unknown[] = [];
+  const identity = { runId: "run-ssh-stop", environmentLeaseId: "lease-ssh-stop",
+    runnerInstanceId: "runner-ssh-stop", normalizedSessionId: "session-ssh-stop",
+    turnId: "turn-ssh-stop", itemId: "item-ssh-stop" };
   const bundle = createCapabilityRunnerdCodexTransport({
     homeMode: "preconfigured", environment: { ...process.env, HOME: home, CODEX_HOME: codexHome },
+    trustedHostFullAccess,
+    prpIdentity: identity,
+    onExecutionStopped: async observed => { stopped.push(observed); },
     runnerBinary: resolve(import.meta.dirname, "../../runner/target/debug/paperclip-runnerd"),
-    codexCommand: fakeCodex, codexArgs: fakeCodexArgs(stateDirectory), stateDirectory,
+    codexCommand: fakeCodex, codexArgs: fakeCodexArgs(stateDirectory, "--request-log", calls), stateDirectory,
   });
   try {
-    await bundle.transport.request("thread/start", { cwd: stateDirectory, model: "gpt-5.6-sol", dynamicTools: [] });
+    await bundle.transport.request("thread/start", { cwd: stateDirectory, model: "gpt-5.6-sol", dynamicTools: [],
+      ...(readOnly ? { permissions: "paperclip-runner-workspace-read-only" } : {}) });
+    const state = JSON.parse(await readFile(join(stateDirectory, "runner", "codex-provider-state.json"), "utf8"));
+    expect(Boolean(state.config.trustedHostFullAccess)).toBe(trustedHostFullAccess && !readOnly);
+    const requests = (await readFile(calls, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const thread = requests.find(value => value.method === "thread/start").params;
+    if (trustedHostFullAccess && !readOnly) {
+      expect(thread.sandbox).toBe("danger-full-access");
+      expect(thread).not.toHaveProperty("permissions");
+    } else {
+      expect(thread.permissions).toBe(readOnly ? "paperclip-runner-workspace-read-only" : "paperclip-runner-workspace-only");
+      expect(thread).not.toHaveProperty("sandbox");
+    }
     await bundle.transport.close();
+    expect(bundle.evidence().runnerExited).toBe(true);
+    expect(stopped).toEqual([identity]);
+    await bundle.transport.close();
+    expect(stopped).toHaveLength(1);
     expect(await readFile(join(codexHome, "config.toml"), "utf8")).toBe(config);
     expect(await readFile(join(codexHome, "auth.json"), "utf8")).toBe(auth);
     await expect(stat(join(stateDirectory, "codex-home"))).rejects.toMatchObject({ code: "ENOENT" });

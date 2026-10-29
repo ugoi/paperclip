@@ -1,3 +1,4 @@
+import { restConnectorFor } from "./connectors/rest-registry.js";
 import type { runPromptInjectionProvider } from "./prompt-injection-provider.js";
 import { promptInjectionPreventionService } from "./prompt-injection-prevention.js";
 import { adapterExecutionControls } from "./adapter-execution-control.js";
@@ -5,7 +6,7 @@ import type { BudgetServiceHooks } from "./budgets.js";
 import type { PromptInjectionDetectorMetadata } from "@paperclipai/shared";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { measureToolDiscovery, measureRunPhase } from "./execution-preparation-timing.js";
-import { executeDaytonaTool, isDaytonaConnection, isCurrentDaytonaCatalogEntry } from "./daytona.js";
+import { nativeProviderCatalogFor } from "./native-provider-catalogs.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { googleWorkspaceToolTarget, googleWorkspaceGrantedScopes, isGoogleWorkspaceToolGranted } from "@paperclipai/shared";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
@@ -29,6 +30,8 @@ import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import { logger } from "../middleware/logger.js";
+import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
+import { instanceSettingsService } from "./instance-settings.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -181,6 +184,7 @@ import {
   readSignedToolArgumentsPayload,
   signToolArguments,
   summarizeToolValue,
+  toolRequestIdentityHash,
   TOOL_ACTION_REQUEST_SIGNING_GRACE_MS,
   ToolActionSigningSecretMissingError,
   ToolContentValidationError,
@@ -1233,7 +1237,18 @@ export function createToolGatewayService(
   });
   const pluginToolDispatcher = options.pluginToolDispatcher;
   const interactions = issueThreadInteractionService(db);
-  const policyService = toolAccessPolicyService(db);
+  const policyService = toolAccessPolicyService(db, { toolActionSigningSecret: options.toolActionSigningSecret });
+  async function recordToolInvocation(input: ToolAccessDecisionInput, decision: ToolAccessDecision) {
+    try {
+      return await policyService.recordInvocation(input, decision);
+    } catch (error) {
+      const details = error instanceof HttpError ? asRecord(error.details) : null;
+      if (error instanceof HttpError && error.status === 409 && details?.reasonCode === "legacy_tool_idempotency_unverifiable") {
+        throw new ToolGatewayHttpError(error.status, error.message, details.reasonCode, details);
+      }
+      throw error;
+    }
+  }
   const secrets = secretService(db);
   // Authentication produces a new session object for every operation. Keep
   // credential acquisition scoped to that object and out of persisted inputs.
@@ -1437,12 +1452,16 @@ export function createToolGatewayService(
       return connectionRow ? [{ catalogEntry, ...connectionRow }] : [];
     });
 
+    const featureSettings = connectionRows.some(({ application }) => getAppDefinitionForApplicationKey(application.applicationKey)?.experimentalFeatureKey)
+      ? await instanceSettingsService(db).getExperimental() : undefined;
     const eligibleRows = rows.filter(
       ({ catalogEntry, connection, application }) =>
+        (!featureSettings || isConnectorFeatureEnabled(getAppDefinitionForApplicationKey(application.applicationKey), featureSettings)) &&
         !isRetiredComposioConnection(connection) &&
-        !(isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(catalogEntry)) &&
+        !(nativeProviderCatalogFor(connection) && !nativeProviderCatalogFor(connection)!.isCurrentEntry(catalogEntry)) &&
+        !(restConnectorFor(connection) && !restConnectorFor(connection)!.isCurrent(catalogEntry)) &&
         !(isRailwayEndpoint(connection.config.url) && (isRailwayToolBlocked(catalogEntry.toolName) || (normalizeRailwayToolName(catalogEntry.toolName).startsWith(RAILWAY_TOOL_PREFIX) && connection.config.railwayApiStatus !== "available"))) &&
-        (((isBrowserUseConnection(connection) || isDaytonaConnection(connection)) && application.type === "rest_api") ||
+        (((isBrowserUseConnection(connection) || nativeProviderCatalogFor(connection) || restConnectorFor(connection)) && application.type === "rest_api") ||
         (connection.transport === "mcp_remote" &&
           application.type === "mcp_http") ||
         (connection.transport === "local_stdio" &&
@@ -1468,7 +1487,7 @@ export function createToolGatewayService(
       ({ catalogEntry, connection, application }, index) => {
         if (
           connection.transport !== "mcp_remote" &&
-          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection)
+          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection) && !nativeProviderCatalogFor(connection) && !restConnectorFor(connection)
         ) {
           throw new Error(
             `Non-MCP connection ${connection.id} cannot be exposed through the MCP gateway`,
@@ -2402,7 +2421,7 @@ export function createToolGatewayService(
     policyDecision: ToolAccessDecision;
   }): Promise<never> {
     const canonicalArguments = canonicalToolArguments(input.parameters);
-    const canonicalArgumentsHash = input.argumentsSummary.sha256 ?? "";
+    const canonicalArgumentsHash = toolRequestIdentityHash(input.parameters, options.toolActionSigningSecret);
     const approvalSnapshot = await connectedRemoteApprovalSnapshot(
       input.session,
       input.tool,
@@ -3204,8 +3223,20 @@ export function createToolGatewayService(
       }
     }
     if (tool.providerType === "paperclip_github_chat") {
-      const data = await githubChatReviewService(db).execute(session, tool.upstreamToolName ?? "", parameters, invocationId);
-      return { content: JSON.stringify(data), data };
+      try {
+        const data = await githubChatReviewService(db).execute(session, tool.upstreamToolName ?? "", parameters, invocationId);
+        return { content: JSON.stringify(data), data };
+      } catch (error) {
+        // Complete request identities can reach the publication owner through
+        // fresh execution instead of receipt replay. Preserve the same conflict
+        // category for changed content without reclassifying stale-head or
+        // assessment-coverage conflicts from that owner.
+        if (error instanceof HttpError && error.status === 409
+          && asRecord(error.details)?.reasonCode === "github_idempotency_conflict") {
+          throw new ToolGatewayHttpError(error.status, error.message, "github_idempotency_conflict", asRecord(error.details) ?? {});
+        }
+        throw error;
+      }
     }
     if (tool.name === "mcp-remote-fixture:echo") {
       return {
@@ -4898,7 +4929,7 @@ export function createToolGatewayService(
         ),
       )
       .limit(1);
-    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection))) {
+    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection) && !nativeProviderCatalogFor(connection) && !restConnectorFor(connection))) {
       throw new ToolGatewayHttpError(
         404,
         `Tool "${tool.name}" not found`,
@@ -4921,8 +4952,13 @@ export function createToolGatewayService(
     if (isRailwayEndpoint(connection.config.url) && isRailwayToolBlocked(entry.toolName)) {
       throw new ToolGatewayHttpError(403, "This Railway action cannot bind its effects to an approved target. Use redeploy, restart, or rollback for an existing deployment.", "railway_action_blocked");
     }
-    if (isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(entry)) {
-      throw new ToolGatewayHttpError(409, "Daytona's action catalog changed. Review the updated actions in Permissions.", "daytona_catalog_changed");
+    const nativeProvider = nativeProviderCatalogFor(connection);
+    if (nativeProvider && !nativeProvider.isCurrentEntry(entry)) {
+      throw new ToolGatewayHttpError(409, `${nativeProvider.name}'s action catalog changed. Review the updated actions in Permissions.`, `${nativeProvider.slug}_catalog_changed`);
+    }
+    const restConnector = restConnectorFor(connection);
+    if (restConnector && !restConnector.isCurrent(entry)) {
+      throw new ToolGatewayHttpError(409, `${restConnector.name}'s action catalog changed. Review the updated actions in Permissions.`, "provider_catalog_changed");
     }
     return { entry, connection };
   }
@@ -5340,15 +5376,23 @@ export function createToolGatewayService(
     }
   }
 
+  async function assertApplicationFeatureAvailable(applicationKey: unknown) {
+    const app = getAppDefinitionForApplicationKey(applicationKey);
+    if (app?.experimentalFeatureKey && !isConnectorFeatureEnabled(app, await instanceSettingsService(db).getExperimental())) {
+      throw new ToolGatewayHttpError(403, "This connector is unavailable on this instance.", "connector_unavailable");
+    }
+  }
+
   async function fullyAssignedMcpConnections(session: ToolGatewaySession) {
     if (!session.gatewayProfileId) return [];
-    return db
-      .select({ connection: toolConnections })
+    const rows = await db
+      .select({ connection: toolConnections, applicationKey: toolApplications.applicationKey })
       .from(toolProfileEntries)
       .innerJoin(
         toolConnections,
         eq(toolProfileEntries.connectionId, toolConnections.id),
       )
+      .innerJoin(toolApplications, eq(toolConnections.applicationId, toolApplications.id))
       .where(
         and(
           eq(toolProfileEntries.companyId, session.companyId),
@@ -5356,12 +5400,16 @@ export function createToolGatewayService(
           eq(toolProfileEntries.selectorType, "connection"),
           eq(toolProfileEntries.effect, "include"),
           eq(toolConnections.companyId, session.companyId),
+          eq(toolApplications.companyId, session.companyId),
           eq(toolConnections.enabled, true),
           eq(toolConnections.status, "active"),
           inArray(toolConnections.transport, ["mcp_remote", "local_stdio"]),
         ),
-      )
-      .then((rows) => rows.map((row) => row.connection));
+      );
+    const settings = rows.some(row => getAppDefinitionForApplicationKey(row.applicationKey)?.experimentalFeatureKey)
+      ? await instanceSettingsService(db).getExperimental() : undefined;
+    return rows.filter(row => !settings || isConnectorFeatureEnabled(getAppDefinitionForApplicationKey(row.applicationKey), settings))
+      .map(row => row.connection);
   }
 
   async function callRemoteConnectionProtocol(input: {
@@ -5472,6 +5520,10 @@ export function createToolGatewayService(
     params?: Record<string, unknown>;
     callerHeaders?: Record<string, string | string[] | undefined>;
   }): Promise<unknown> {
+    const [application] = await db.select({ applicationKey: toolApplications.applicationKey }).from(toolApplications)
+      .where(and(eq(toolApplications.id, input.connection.applicationId), eq(toolApplications.companyId, input.session.companyId))).limit(1);
+    if (!application) throw new ToolGatewayHttpError(404, "MCP connection not found", "connection_not_found");
+    await assertApplicationFeatureAvailable(application.applicationKey);
     if (input.connection.transport === "mcp_remote") {
       return callRemoteConnectionProtocol({
         ...input,
@@ -6039,6 +6091,7 @@ export function createToolGatewayService(
       session,
       tool,
     );
+    await assertApplicationFeatureAvailable(tool.applicationKey);
     // Recheck immediately before dispatch, including previously approved calls
     // and connections whose stored grant/catalog predates scope reduction.
     assertGoogleChatToolArgumentsSupported(connection, entry.toolName, parameters);
@@ -6047,11 +6100,23 @@ export function createToolGatewayService(
       ms = railwayCommandBudgetMs(parameters);
     }
     const grant = await resolveConnectionGrant(session, connection);
-    if (isDaytonaConnection(connection)) {
+    const restConnector = restConnectorFor(connection);
+    if (restConnector) {
       const budgetMs = Math.min(ms, 30_000);
       const deadlineAt = Date.now() + budgetMs;
       const signal = AbortSignal.timeout(budgetMs);
-      const data = await executeDaytonaTool({ binding: session, connection,
+      const client = restConnector.client(connection, await resolveCredentialHeaders(session, connection, grant),
+        (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
+          : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()), signal, deadlineAt);
+      const data = await client.invoke(entry.toolName, parameters);
+      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } } };
+    }
+    const nativeProvider = nativeProviderCatalogFor(connection);
+    if (nativeProvider) {
+      const budgetMs = Math.min(ms, 30_000);
+      const deadlineAt = Date.now() + budgetMs;
+      const signal = AbortSignal.timeout(budgetMs);
+      const data = await nativeProvider.execute({ binding: session, connection,
         headers: await resolveCredentialHeaders(session, connection, grant),
         request: (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
           : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()),
@@ -8154,8 +8219,12 @@ export function createToolGatewayService(
     const parameters = signedPayload.arguments;
     const canonicalArguments = canonicalToolArguments(parameters);
     if (
-      claimed.canonicalArgumentsHash !==
-        summarizeToolValue(parameters).sha256 ||
+      ![
+        toolRequestIdentityHash(parameters, options.toolActionSigningSecret),
+        // Historical approvals used the redacted preview hash. Their signature
+        // still binds the complete canonical arguments checked below.
+        summarizeToolValue(parameters).sha256,
+      ].includes(claimed.canonicalArgumentsHash) ||
       !verifyToolArgumentsSignature({
         signedArguments: claimed.signedArguments,
         invocationId: invocation.id,
@@ -8353,6 +8422,7 @@ export function createToolGatewayService(
     session: ToolGatewaySession;
     toolName: string;
     argumentsHash: string;
+    parameters: unknown;
   }) {
     if (!input.session.issueId || !input.session.agentId) return null;
     const [match] = await db
@@ -8369,7 +8439,7 @@ export function createToolGatewayService(
         and(
           eq(toolActionRequests.companyId, input.session.companyId),
           eq(toolActionRequests.issueId, input.session.issueId),
-          eq(toolActionRequests.canonicalArgumentsHash, input.argumentsHash),
+          inArray(toolActionRequests.canonicalArgumentsHash, [input.argumentsHash, summarizeToolValue(input.parameters).sha256]),
           eq(toolInvocations.agentId, input.session.agentId),
           eq(toolInvocations.toolName, input.toolName),
           inArray(toolActionRequests.status, [
@@ -8382,9 +8452,25 @@ export function createToolGatewayService(
           ]),
         ),
       )
-      .orderBy(desc(toolActionRequests.createdAt))
+      .orderBy(
+        desc(sql`${toolActionRequests.canonicalArgumentsHash} = ${input.argumentsHash}`),
+        desc(toolActionRequests.createdAt),
+      )
       .limit(1);
     if (!match) return null;
+    if (match.actionRequest.signedArguments) {
+      const signed = readSignedToolArgumentsPayload({
+        signedArguments: match.actionRequest.signedArguments,
+        invocationId: match.invocation.id,
+        toolName: match.invocation.toolName,
+        signingSecret: options.toolActionSigningSecret,
+      });
+      // Redacted legacy hashes can collide across different secrets. Only
+      // replay the exact authenticated arguments, including legacy approvals.
+      if (!signed || canonicalToolArguments(signed.arguments) !== canonicalToolArguments(input.parameters)) return null;
+    } else if (match.actionRequest.canonicalArgumentsHash !== input.argumentsHash) {
+      return null;
+    }
     if (match.actionRequest.status === "failed" && match.invocation.errorCode !== "provider_interaction_required") return null;
     // The gateway builds an ask-first request in two steps inside one call: it
     // inserts the row with a null signature and a null expiry, then signs the
@@ -8440,6 +8526,7 @@ export function createToolGatewayService(
     session: ToolGatewaySession;
     toolName: string;
     argumentsHash: string;
+    parameters: unknown;
   }) {
     const match = await matchingAgentActionRequest(input);
     if (!match) return null;
@@ -9393,7 +9480,7 @@ export function createToolGatewayService(
         consumeRateLimit: true,
       });
       const accessDecision = await policyService.decide(decisionInput);
-      const recorded = await policyService.recordInvocation(
+      const recorded = await recordToolInvocation(
         decisionInput,
         accessDecision,
       );
@@ -9413,7 +9500,7 @@ export function createToolGatewayService(
           );
         }
         const canonicalArguments = canonicalToolArguments(requestedParameters);
-        const canonicalArgumentsHash = argumentValidation.summary.sha256 ?? "";
+        const canonicalArgumentsHash = toolRequestIdentityHash(requestedParameters, options.toolActionSigningSecret);
         const approvalSnapshot = await connectedRemoteApprovalSnapshot(
           session,
           tool,
@@ -10122,7 +10209,7 @@ export function createToolGatewayService(
         if (typeof args.idempotencyKey === "string") {
           const key = `slack:${tool.connectionId}:${session.issueId}:${session.responsibleUserId}:${args.idempotencyKey}`;
           const [prior] = await db.select().from(toolInvocations).where(and(eq(toolInvocations.companyId, session.companyId), eq(toolInvocations.idempotencyKey, key)));
-          const currentHash = (await validateToolContent({ value: args, direction: "arguments", sensitiveMode: "redact", promptInjectionMode: "ignore" })).summary.sha256;
+          const currentHash = toolRequestIdentityHash(args, options.toolActionSigningSecret);
           if (prior && (prior.toolName !== tool.name || prior.argumentsHash !== currentHash)) throw new ToolGatewayHttpError(409, "Idempotency key belongs to a different Slack operation", "slack_idempotency_conflict");
           input = { ...input, idempotencyKey: key };
         }
@@ -10292,7 +10379,8 @@ export function createToolGatewayService(
         const replay = await replayMatchingAgentAction({
           session,
           toolName: tool.name,
-          argumentsHash: argumentValidation.summary.sha256 ?? "",
+          argumentsHash: toolRequestIdentityHash(requestedParameters, options.toolActionSigningSecret),
+          parameters: requestedParameters,
         });
         if (replay?.matched) {
           let replayResult: unknown = replay.result;
@@ -10625,8 +10713,10 @@ export function createToolGatewayService(
         });
         const storedCanonical = canonicalToolArguments(storedParameters);
         if (
-          actionRequest.canonicalArgumentsHash !==
-            summarizeToolValue(storedParameters).sha256 ||
+          ![
+            toolRequestIdentityHash(storedParameters, options.toolActionSigningSecret),
+            summarizeToolValue(storedParameters).sha256,
+          ].includes(actionRequest.canonicalArgumentsHash) ||
           !verifyToolArgumentsSignature({
             signedArguments: actionRequest.signedArguments,
             invocationId: storedInvocation.id,
@@ -10707,7 +10797,7 @@ export function createToolGatewayService(
         if (accessDecision.allowed && tool.providerType === "paperclip_slack_chat" && SLACK_TOOLS.some(t => t.name === tool.upstreamToolName && t.risk === "approval")) {
           accessDecision = { ...accessDecision, allowed: false, decision: "require_approval", reasonCode: "requires_approval_policy", explanation: "Slack destructive actions, channel creation and invitations require approval." };
         }
-        const recorded = await policyService.recordInvocation(
+        const recorded = await recordToolInvocation(
           decisionInput,
           accessDecision,
         );
@@ -11226,7 +11316,7 @@ export function createToolGatewayService(
         consumeRateLimit: true,
       });
       const accessDecision = await policyService.decide(decisionInput);
-      const recorded = await policyService.recordInvocation(
+      const recorded = await recordToolInvocation(
         decisionInput,
         accessDecision,
       );

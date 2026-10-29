@@ -1,7 +1,8 @@
 import type { Issue } from "@paperclipai/shared";
 
 /** Context never promotes an unrelated or orphaned automated task to a result. */
-export function includeIssueHierarchyContext(matches: Issue[], context: Issue[]): Issue[] {
+export function includeIssueHierarchyContext(matches: Issue[], context: Issue[], statuses: readonly string[] = []): Issue[] {
+  const matchesStatus = (issue: Issue) => statuses.length === 0 || statuses.includes(issue.status);
   const byId = new Map([...context, ...matches].map((issue) => [issue.id, issue]));
   const result = new Map(matches.map((issue) => [issue.id, issue]));
   for (const match of matches) {
@@ -11,7 +12,7 @@ export function includeIssueHierarchyContext(matches: Issue[], context: Issue[])
       visited.add(parentId);
       const parent = byId.get(parentId);
       if (!parent) break;
-      result.set(parent.id, parent);
+      if (matchesStatus(parent)) result.set(parent.id, parent);
       parentId = parent.parentId;
     }
   }
@@ -23,7 +24,8 @@ export function includeIssueHierarchyContext(matches: Issue[], context: Issue[])
     for (const issue of context) {
       if (!descendantIds.has(issue.id) && issue.parentId && descendantIds.has(issue.parentId)) {
         descendantIds.add(issue.id);
-        result.set(issue.id, issue);
+        // Keep traversing excluded parents so matching grandchildren remain visible.
+        if (matchesStatus(issue)) result.set(issue.id, issue);
         changed = true;
       }
     }

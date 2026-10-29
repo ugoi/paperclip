@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
+import { isStoredIsolatedTaskDirectory, materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
+import type { ExecutionWorkspace } from "@paperclipai/shared";
 import { prepareSandboxManagedRuntime, type SandboxManagedRuntimeClient, type SandboxSyncOperation } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 const execFile = promisify(execFileCallback);
@@ -50,6 +51,23 @@ describe("isolated task directories", () => {
     vi.stubEnv("PAPERCLIP_HOME", root);
     return { companyId: "company-1", issueId: "issue-1" };
   }
+
+  it.each([undefined, "retry-1"])("recognizes only the task-owned plain directory on continuation (attempt %s)", async attemptId => {
+    const identity = await setup();
+    const cwd = await materializeIsolatedTaskDirectory({ ...identity, attemptId });
+    const workspace = { companyId: identity.companyId, sourceIssueId: identity.issueId, mode: "isolated_workspace",
+      strategyType: "project_primary", projectWorkspaceId: null, repoUrl: null, cwd } as ExecutionWorkspace;
+    const input = { ...identity, workspace, workspaceStrategies: [undefined, {}, { type: "project_primary" }] };
+    expect(isStoredIsolatedTaskDirectory(input)).toBe(true);
+    for (const patch of [{ companyId: "other-company" }, { sourceIssueId: "other-task" },
+      { mode: "shared_workspace" }, { strategyType: "git_worktree" }, { projectWorkspaceId: "repository" },
+      { repoUrl: "https://example.test/repo.git" }, { cwd: path.dirname(cwd) }, { cwd: `${cwd}/child` }]) {
+      expect(isStoredIsolatedTaskDirectory({ ...input, workspace: { ...workspace, ...patch } as ExecutionWorkspace })).toBe(false);
+    }
+    for (const strategy of [{ type: "git_worktree" }, { existingBranch: "main" }, { provisionCommand: "setup" }]) {
+      expect(isStoredIsolatedTaskDirectory({ ...input, workspaceStrategies: [strategy] })).toBe(false);
+    }
+  });
 
   it("retains a task's files across turns without sharing them with another task or company", async () => {
     const identity = await setup();

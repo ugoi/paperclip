@@ -40,6 +40,17 @@ The plugin supports two backend modes, selected via the `backend` config field:
 
 **`sandbox-cr` (default):** Creates a `Sandbox` CR (`agents.x-k8s.io/v1alpha1`) whose controller provisions a long-lived pod running `sleep infinity`. paperclip-server execs individual commands into the running pod — this is the multi-command adapter-install pattern. When you `releaseLease`, the Sandbox CR is deleted and the controller tears down the pod.
 
+Fresh acquisition waits up to four minutes for the Sandbox to become Ready
+(bounded further by `podActivityDeadlineSec`). This gives image pulls, Kata guest
+boot and required init sidecars their own startup budget. A subsequent short
+command, such as the 15-second working-directory probe, retains its full budget.
+The driver's default acquisition RPC deadline is five minutes so startup-failure
+cleanup can be observed too; an explicit environment `timeoutMs` override must
+leave enough time for both. The existing two-second readiness poll runs only
+during acquisition and stops on readiness, failure or timeout. Failed startup
+deletes the allocation and confirms teardown; uncertain cleanup retains its
+exact ownership through the SDK cleanup error so the host can retry.
+
 **`job` (stable fallback):** Creates a `batch/v1` Job. The container entrypoint runs once and exits — no multi-command exec possible. Use this when you cannot install agent-sandbox, or when you need strictly stable Kubernetes APIs. Note: paperclip-server's adapter-install pattern will not work in job mode.
 
 ### Migrating from `job` to `sandbox-cr`
@@ -178,3 +189,19 @@ To run the kind-cluster integration test (requires `kubectl --context kind-paper
 ```bash
 RUN_K8S_INTEGRATION_TESTS=1 pnpm test test/integration/end-to-end-run.test.ts
 ```
+## Fresh sandbox workspace
+
+Acquired leases record `/workspace`, the pod's existing emptyDir mount, as
+their initial file-sync root. This lets setup probes stage runtime assets
+before workspace-realization metadata is persisted. Realized workspace
+metadata can still select a more specific root. Missing roots and paths
+outside the selected root continue to fail closed.
+
+## Confirmed termination
+
+Release and destroy return a provider termination receipt only after the exact
+Sandbox/Job, its known or owner-referenced pods, and its per-run Secret disappear.
+An accepted DELETE or a deletion timestamp is insufficient. Verification is a
+bounded 45-second wait during cleanup; authorization errors and timeouts fail
+closed. This lets Paperclip safely finish cancellation and resume an agent.
+The provider needs pod list access, and destroy also requires pod delete access.

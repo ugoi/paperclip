@@ -2,6 +2,29 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parseObject } from "../adapters/utils.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
+import type { ExecutionWorkspace } from "@paperclipai/shared";
+
+/** A retained plain retry directory remains a directory on later turns. */
+export function isStoredIsolatedTaskDirectory(input: {
+  companyId: string;
+  issueId: string;
+  workspace: ExecutionWorkspace | null;
+  workspaceStrategies: unknown[];
+}): boolean {
+  const workspace = input.workspace;
+  if (!workspace || workspace.companyId !== input.companyId ||
+      workspace.sourceIssueId !== input.issueId || workspace.mode !== "isolated_workspace" ||
+      workspace.strategyType !== "project_primary" || workspace.projectWorkspaceId || workspace.repoUrl ||
+      !workspace.cwd || !path.isAbsolute(workspace.cwd) || path.resolve(workspace.cwd) !== workspace.cwd ||
+      !input.workspaceStrategies.every(value => Object.entries(parseObject(value)).every(
+        ([key, item]) => key === "type" && item === "project_primary"))) return false;
+  const segments = path.relative(resolvePaperclipInstanceRoot(), workspace.cwd).split(path.sep);
+  return segments[1] === input.companyId && segments[2] === input.issueId && (
+    (segments[0] === "isolated-workspaces" && segments.length === 3) ||
+    (segments[0] === "isolated-workspace-attempts" && segments.length === 4 &&
+      /^[a-zA-Z0-9_-]+$/.test(segments[3]!))
+  );
+}
 
 /** A repository-free sandbox task needs isolation, but has no Git base. */
 export function shouldUseIsolatedTaskDirectory(input: {
