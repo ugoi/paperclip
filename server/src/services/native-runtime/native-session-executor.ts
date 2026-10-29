@@ -8881,8 +8881,10 @@ async function executePaperclipNativeSessionWithinScope(
           durableEnvironmentLeaseId: durableRunnerBinding?.environmentLeaseId, trace, toolTrace });
       }
     }
-    const remoteCleanupLease = input.runnerExecutionTarget?.kind === "remote" &&
-        input.runnerExecutionTarget.transport === "sandbox" && input.runnerExecutionTarget.leaseId
+    // SSH owns a remote resource too. Without this scope its failed cleanup
+    // poisons every same-provider session and cannot be retired by the exact
+    // authenticated remote-stop receipt.
+    const remoteCleanupLease = input.runnerExecutionTarget?.kind === "remote" && input.runnerExecutionTarget.leaseId
       ? await input.db.select({ provider: environmentLeases.provider, providerLeaseId: environmentLeases.providerLeaseId })
           .from(environmentLeases).where(and(
             eq(environmentLeases.companyId, input.execution.binding.companyId),

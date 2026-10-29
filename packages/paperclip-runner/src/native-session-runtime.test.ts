@@ -4279,9 +4279,11 @@ describe("executeNativeSession recovery", () => {
     expect(order).toEqual(["closing", "stopped", "collected"]);
   });
 
-  it("retires only the terminated remote resource, including two sandboxes for one run", async () => {
-    const scopedIdentity = { ...identity, companyId: "remote-stop-company", runId: "remote-stop-run" };
-    const binding = { ...scopedIdentity, remoteCleanupScope: "first-sandbox" };
+  it.each(["sandbox", "ssh"])("retires only the terminated %s resource, preserving another resource for the same run", async provider => {
+    const firstScope = JSON.stringify([provider, "first-remote-resource"]);
+    const otherScope = JSON.stringify([provider, "other-remote-resource"]);
+    const scopedIdentity = { ...identity, companyId: `remote-stop-company-${provider}`, runId: `remote-stop-run-${provider}` };
+    const binding = { ...scopedIdentity, remoteCleanupScope: firstScope };
     const scopedInput = { ...input, binding: { ...input.binding, companyId: scopedIdentity.companyId, runId: scopedIdentity.runId } };
     const failure = new NativeSessionCloseUnrecoverableError();
     const capabilities = { resume: true, typedEvents: true, steering: false, interruption: false, structuredResult: true };
@@ -4313,17 +4315,17 @@ describe("executeNativeSession recovery", () => {
     expect(completeTerminatedRemoteNativeSessionCleanup({ ...binding, companyId: "other-company" })).toBe(true);
     await expect(executeNativeSession(options)).rejects.toBeInstanceOf(NativeSessionCleanupQuarantinedError);
     expect(backend.openSession).toHaveBeenCalledOnce();
-    // A separate sandbox can start without inheriting this process quarantine.
+    // A separate remote resource can start without inheriting this process quarantine.
     const independent = { ...scopedIdentity, sessionId: "other-sandbox-session" };
     const independentSession = { ...session, identity: () => independent };
     const independentBackend = { ...backend, openSession: vi.fn(async () => independentSession) };
-    await expect(executeNativeSession({ ...options, remoteCleanupScope: "other-sandbox",
+    await expect(executeNativeSession({ ...options, remoteCleanupScope: otherScope,
       input: { ...scopedInput, binding: { ...scopedInput.binding, runId: independent.runId } },
       backend: independentBackend })).rejects.toMatchObject({ message: "cancelled remote transport", cleanupError: failure });
     expect(independentBackend.openSession).toHaveBeenCalledOnce();
     expect(completeTerminatedRemoteNativeSessionCleanup(binding)).toBe(true);
-    // Same company/run, different sandbox: its quarantine must remain intact.
-    await expect(executeNativeSession({ ...options, remoteCleanupScope: "other-sandbox",
+    // Same company/run, different remote resource: its quarantine must remain intact.
+    await expect(executeNativeSession({ ...options, remoteCleanupScope: otherScope,
       backend: independentBackend })).rejects.toBeInstanceOf(NativeSessionCleanupQuarantinedError);
     expect(independentBackend.openSession).toHaveBeenCalledOnce();
     // Reopening is now possible; the old failure/result was never rewritten.
@@ -4331,7 +4333,7 @@ describe("executeNativeSession recovery", () => {
     expect(backend.openSession).toHaveBeenCalledTimes(2);
     expect(controlPlane.completeRun).not.toHaveBeenCalled();
     completeTerminatedRemoteNativeSessionCleanup(binding);
-    completeTerminatedRemoteNativeSessionCleanup({ ...binding, remoteCleanupScope: "other-sandbox" });
+    completeTerminatedRemoteNativeSessionCleanup({ ...binding, remoteCleanupScope: otherScope });
   });
 
   it("retires local quarantine only for the stopped run and runner instance", async () => {

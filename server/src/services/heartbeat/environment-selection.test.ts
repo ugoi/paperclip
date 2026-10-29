@@ -13,6 +13,7 @@ import { instanceSettingsService } from "../instance-settings.js";
 import { buildNativeExecutionInput } from "../native-runtime/native-execution-input.js";
 import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.test-fixture.js";
 import { selectHeartbeatEnvironment, type HeartbeatEnvironmentSelectionInput } from "./environment-selection.js";
+import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
 
 const restoration = vi.hoisted(() => ({ removed: false }));
 vi.mock("../git-workspace-restoration.js", async importOriginal => {
@@ -213,6 +214,35 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
       expect(input.services.findSharedWorkspaceHolder).not.toHaveBeenCalled();
       expect(input.task.issueRef!.executionWorkspaceId).toBe(source.id);
     } finally { read.mockRestore(); select.mockRestore(); }
+  });
+
+  it.each([false, true])("preserves a repository-free SSH task directory across later admissions (fresh attempt: %s)", async freshAttempt => {
+    const { input, issue } = await fixture();
+    const cwd = await materializeIsolatedTaskDirectory({ companyId: input.agent.companyId, issueId: issue.id,
+      ...(freshAttempt ? { attemptId: randomUUID() } : {}) });
+    const saved = await executionWorkspaceService(db).create({ companyId: input.agent.companyId,
+      sourceIssueId: issue.id, name: "Plain SSH task", mode: "isolated_workspace", strategyType: "project_primary", cwd });
+    if (!saved) throw new Error("Task directory fixture was not created");
+    const [ssh] = await db.insert(environments).values({ name: `Native SSH ${randomUUID()}`, driver: "ssh", status: "active",
+      config: { host: "fixture.invalid", username: "fixture", remoteWorkspacePath: "/workspace" } }).returning();
+    input.agent.defaultEnvironmentId = ssh.id;
+    input.task.issueRef!.executionWorkspaceId = saved.id;
+    input.task.issueRef!.executionWorkspacePreference = "reuse_existing";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    await db.update(issues).set({ executionWorkspaceId: saved.id, executionWorkspacePreference: "reuse_existing" })
+      .where(eq(issues.id, issue.id));
+    for (let admission = 0; admission < 2; admission++) {
+      const [nextRun] = await db.insert(heartbeatRuns).values({ companyId: input.agent.companyId,
+        agentId: input.agent.id, issueId: issue.id, scopeKind: "issue", status: "running", runtimeMode: "legacy" }).returning();
+      input.run = nextRun;
+      const result = await selectHeartbeatEnvironment(db, input);
+      expect(result.selectedEnvironmentForConfig?.driver).toBe("ssh");
+      expect(result.reusableExistingExecutionWorkspace).toMatchObject({ id: saved.id, cwd, strategyType: "project_primary" });
+      expect(result.explicitTaskDirectory).toBe(true);
+      expect(result.useIsolatedTaskDirectory).toBe(false);
+    }
+    input.config.config.workspaceStrategy = { type: "git_worktree", existingBranch: "main" };
+    expect((await selectHeartbeatEnvironment(db, input)).explicitTaskDirectory).toBe(false);
   });
 
   it("uses the low-trust task sandbox even when workspace feature gates hide issue settings", async () => {
