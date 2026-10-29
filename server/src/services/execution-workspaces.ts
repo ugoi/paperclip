@@ -1,4 +1,5 @@
 import { effectiveProjectWorkspacePolicy } from "./project-workspace-provider.js";
+import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { inspectPluginWorkspace, removePluginWorkspace, restorePluginWorkspace, type WorkspaceWorkers } from "./plugin-workspaces.js";
 import { acquireExecutionWorkspaceLifecycleLock, withExecutionWorkspaceLifecycleLock } from "./execution-workspace-lifecycle-lock.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
@@ -1383,8 +1384,35 @@ async function hasPendingTaskWorkspaceRecovery(tx: DbTransaction, input: {
   for (const operation of operations) {
     if (operation.runId && !latest.has(operation.runId)) latest.set(operation.runId, operation.status);
   }
+  // A provider failure also writes a failed finalize receipt, even for a shared
+  // remote directory with no copyback. Once its exact remote owner has stopped,
+  // that historical provider error must not fence every later workspace choice.
+  // Accepted results, export obligations and unverifiable owners remain fenced.
+  const failedWithoutOutput = rows.filter(({ finalization, run }) =>
+    latest.get(run.id) === "failed" && finalization.phase === "terminal_failure"
+    && finalization.resultId === null && !run.runnerProfileJson?.nativeWorkspaceSync
+    && !run.runnerProfileJson?.nativeWorkspaceFinalizationOwner);
+  const settledSharedRuns = new Set<string>();
+  if (failedWithoutOutput.length) {
+    const leases = await tx.select().from(environmentLeases).where(and(
+      eq(environmentLeases.companyId, input.companyId),
+      inArray(environmentLeases.heartbeatRunId, failedWithoutOutput.map(({ run }) => run.id)),
+    ));
+    for (const { run } of failedWithoutOutput) {
+      const owned = leases.filter(lease => lease.heartbeatRunId === run.id);
+      if (owned.length > 0 && owned.every(lease => {
+        const realization = parseObject(lease.metadata?.workspaceRealization);
+        return hasRemoteTerminationReceipt(lease)
+          && lease.metadata?.executionWorkspaceMode === "shared_workspace"
+          && parseObject(realization.rebuild).mode === "shared_workspace"
+          && Array.isArray(realization.outboundRestorePaths)
+          && realization.outboundRestorePaths.length === 0;
+      })) settledSharedRuns.add(run.id);
+    }
+  }
   return rows.some(({ finalization, run }) => {
     const status = latest.get(run.id);
+    if (status === "failed" && settledSharedRuns.has(run.id)) return false;
     if (status !== undefined) return status !== "succeeded";
     return finalization.phase === "terminal_failure" && finalization.resultId !== null;
   });

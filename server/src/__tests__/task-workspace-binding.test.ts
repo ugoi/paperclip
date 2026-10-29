@@ -418,6 +418,30 @@ const support = await getEmbeddedPostgresTestSupport();
       }
     });
 
+    it.each(["settled", "wrong receipt", "copyback", "unknown restore paths", "sync reference", "finalizer owner", "accepted output"] as const)(
+      "handles a shared remote provider failure with %s evidence", async evidence => {
+        const f = await settledNativeTask("native_provider_terminal_failed", evidence === "accepted output");
+        await db.insert(workspaceOperations).values({ companyId: f.companyId, issueId: f.issueId,
+          heartbeatRunId: f.run.id, executionWorkspaceId: f.workspaceId, phase: "workspace_finalize", status: "failed",
+          metadata: { errorMessage: "provider_turn_lost_on_restore" } });
+        await db.update(environmentLeases).set({ provider: "ssh", providerLeaseId: "ssh://test/shared",
+          metadata: { executionWorkspaceMode: "shared_workspace",
+            workspaceRealization: { rebuild: { mode: "shared_workspace" },
+              ...(evidence === "unknown restore paths" ? {} : { outboundRestorePaths: evidence === "copyback" ? ["pending"] : [] }) },
+            remoteExecutionTermination: { schema: "paperclip.remote-termination.v1", companyId: f.companyId,
+              runId: evidence === "wrong receipt" ? randomUUID() : f.run.id, leaseId: f.lease.id,
+              provider: "ssh", providerLeaseId: "ssh://test/shared", state: "stopped" },
+          } }).where(eq(environmentLeases.id, f.lease.id));
+        if (evidence === "sync reference" || evidence === "finalizer owner") await db.update(heartbeatRuns).set({
+          runnerProfileJson: { [evidence === "sync reference" ? "nativeWorkspaceSync" : "nativeWorkspaceFinalizationOwner"]: {} },
+        }).where(eq(heartbeatRuns.id, f.run.id));
+        if (evidence === "settled") {
+          await f.change();
+          expect((await f.svc.inspectTaskWorkspace(f.companyId, f.issueId, f.actor)).workspace).toBeNull();
+          expect((await db.select().from(workspaceOperations).where(eq(workspaceOperations.heartbeatRunId, f.run.id)))[0].status).toBe("failed");
+        } else await expect(f.change()).rejects.toThrow(/workspace|Previous task run/);
+      });
+
     it.each(["warm release", "unsafe export omission"] as const)("accepts a settled %s receipt", async (receipt) => {
       const f = await settledNativeTask("native_retry_cancelled", receipt === "unsafe export omission");
       if (receipt === "warm release") await db.update(environmentLeases).set({ releasedAt: null, status: "retained", leasePolicy: "reuse_by_environment", cleanupStatus: "success" }).where(eq(environmentLeases.id, f.lease.id));

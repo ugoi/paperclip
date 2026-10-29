@@ -1,4 +1,5 @@
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
+import { isExplicitContinuationRetryClaim } from "./explicit-continuation-retry-claim.js";
 import { verifyAppWebhook } from "./app-webhook.js";
 import crypto from "node:crypto";
 import { verifyFirefliesWebhook } from "./fireflies-webhook.js";
@@ -1544,7 +1545,7 @@ export function routineService(
         heartbeatRuns,
         and(
           eq(heartbeatRuns.id, issues.executionRunId),
-          inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
+          eq(heartbeatRuns.companyId, issues.companyId),
         ),
       )
       .where(
@@ -1559,8 +1560,11 @@ export function routineService(
       )
       .orderBy(desc(issues.updatedAt), desc(issues.createdAt))
       .limit(1)
-      .then((rows) => rows[0]?.issues ?? null);
-    if (executionBoundIssue) return executionBoundIssue;
+      .then((rows) => rows[0] ?? null);
+    if (executionBoundIssue && (
+      LIVE_HEARTBEAT_RUN_STATUSES.includes(executionBoundIssue.heartbeat_runs.status)
+      || isExplicitContinuationRetryClaim(executionBoundIssue.issues, executionBoundIssue.heartbeat_runs)
+    )) return executionBoundIssue.issues;
 
     return executor
       .select()
@@ -1857,6 +1861,18 @@ export function routineService(
 
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
+        // The partial unique index covers every non-null execution owner, while
+        // coalescing only considers live work. Release stale terminal pointers
+        // through their owning service before enqueueing; preserve queue-first
+        // explicit-continuation claims and never clear a newly acquired owner.
+        const fingerprintCondition = routineExecutionFingerprintCondition(dispatchFingerprint);
+        const boundIssues = await txDb.select({ id: issues.id }).from(issues).where(and(
+          eq(issues.companyId, input.routine.companyId), eq(issues.originKind, issueOriginKind),
+          eq(issues.originId, issueOriginId), inArray(issues.status, OPEN_ISSUE_STATUSES),
+          visibleIssueCondition(), isNotNull(issues.executionRunId),
+          ...(fingerprintCondition ? [fingerprintCondition] : []),
+        ));
+        for (const owner of boundIssues) await issueSvc.clearExecutionRunIfTerminal(owner.id);
         const activeIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
           kind: issueOriginKind,
           id: issueOriginId,
