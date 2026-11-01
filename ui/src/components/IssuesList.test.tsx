@@ -2167,7 +2167,7 @@ describe("IssuesList", () => {
     const completed = createIssue({
       id: "completed-child", title: "Completed child", parentId: parent.id, status: "done", createdByAgentId: "agent",
     });
-    mockIssuesApi.list.mockImplementation(async (_companyId, filters) => filters?.parentId === parent.id ? [pending, completed] : []);
+    mockIssuesApi.list.mockImplementation(async (_companyId, filters) => filters?.parentIds?.includes(parent.id) ? [pending, completed] : []);
     const { root } = renderWithQueryClient(
       <IssuesList
         issues={fetchChildren ? [parent] : [parent, pending, completed]}
