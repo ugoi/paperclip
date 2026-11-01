@@ -106,6 +106,15 @@ export function remoteExecutionSessionMatches(saved: unknown, current: SshRemote
   );
 }
 
+// A failed workspace upload leaves a partial per-run copy that nothing restores
+// from: the agent never started there. Remove it so repeated failures cannot
+// fill the remote host. Cleanup is best effort and keeps the original error.
+async function removeFailedRunCopy(spec: SshRemoteExecutionSpec, baseRemoteDir: string, runId: string) {
+  if (!/^[A-Za-z0-9_-]+$/.test(runId)) return;
+  const runDir = path.posix.join(baseRemoteDir, ".paperclip-runtime", "runs", runId);
+  await runSshCommand(spec, `rm -rf -- ${shellQuote(runDir)}`, { timeoutMs: 60_000 }).catch(() => undefined);
+}
+
 export async function prepareRemoteManagedRuntime(input: {
   spec: SshRemoteExecutionSpec;
   runId: string;
@@ -143,6 +152,9 @@ export async function prepareRemoteManagedRuntime(input: {
         onProgress: input.onProgress,
         workspaceFileMode: input.workspaceFileMode,
         workspaceExclude: input.workspaceExclude,
+      }).catch(async (error: unknown) => {
+        await removeFailedRunCopy(input.spec, baseWorkspaceRemoteDir, input.runId);
+        throw error;
       })
     : null;
   const projectRepositories = preparedWorkspace?.repositories ?? [];

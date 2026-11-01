@@ -122,6 +122,21 @@ describe("remote managed runtime", () => {
     expect(restoredAuth).toBe('{"token":"remote"}\n');
   });
 
+  it("removes the partial per-run copy when the workspace upload fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-failed-upload-"));
+    cleanupDirs.push(root);
+    prepareWorkspaceForSshExecution.mockRejectedValueOnce(new Error("tar could not archive 391 entries"));
+    runSshCommand.mockClear();
+    await expect(prepareRemoteManagedRuntime({
+      spec: { host: "127.0.0.1", port: 2222, username: "fixture", remoteWorkspacePath: "/app", remoteCwd: "/app",
+        privateKey: "PRIVATE KEY", knownHosts: "KNOWN HOSTS", strictHostKeyChecking: true },
+      runId: "run-failed-upload", adapterKey: "claude", workspaceLocalDir: root,
+    })).rejects.toThrow("tar could not archive 391 entries");
+    expect(runSshCommand).toHaveBeenCalledWith(expect.anything(),
+      "rm -rf -- '/app/.paperclip-runtime/runs/run-failed-upload'", { timeoutMs: 60_000 });
+    expect(syncDirectoryToSsh).not.toHaveBeenCalledWith(expect.objectContaining({ remoteDir: expect.stringContaining("run-failed-upload") }));
+  });
+
   it("stages each additional project into its own isolated SSH dir, isolating one failure", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-additional-"));
     cleanupDirs.push(rootDir);
