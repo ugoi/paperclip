@@ -55,7 +55,7 @@ exact ownership through the SDK cleanup error so the host can retry.
 
 ### Migrating from `job` to `sandbox-cr`
 
-1. Install the agent-sandbox controller: `kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/install.yaml`
+1. Install the agent-sandbox controller: `kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml`
 2. Update your environment config to set `backend: "sandbox-cr"` (or remove `backend` since `sandbox-cr` is the default)
 3. New leases will use the Sandbox CR backend. Existing leases created with `job` mode continue to use job semantics until they are released.
 

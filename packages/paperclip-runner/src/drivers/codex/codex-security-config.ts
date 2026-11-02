@@ -256,6 +256,7 @@ export function createIsolatedCodexAppServerArgs(
   /** Server-registered run copy, never an environment/config-supplied root. */
   instructionWorkingCopyRoot?: string,
   protectedPaths: string[] = [],
+  disableWebSearch = false,
   trustedHostFullAccess = false,
 ): string[] {
   const explicitSource = source;
@@ -366,6 +367,7 @@ export function createIsolatedCodexAppServerArgs(
     ...((externalRunnerSandbox || trustedHostFullAccess)
       ? ["--dangerously-bypass-approvals-and-sandbox"]
       : []),
+    ...(disableWebSearch ? ["-c", 'web_search="disabled"'] : []),
     "app-server",
   ];
 }

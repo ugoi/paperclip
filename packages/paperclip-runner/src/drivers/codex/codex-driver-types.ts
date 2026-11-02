@@ -19,6 +19,8 @@ export interface CodexAppServerDriverOptions {
   model?: string;
   /** Per-run reasoning effort sent with each Codex turn, including resumed turns. */
   reasoningEffort?: string;
+  /** Saved hosted-search restriction for the default process transport. */
+  disableWebSearch?: boolean;
   approvalPolicy?: "never" | "on-request" | "untrusted";
   /** Explicit control-plane grant for an operator-selected trusted host. */
   trustedHostFullAccess?: boolean;

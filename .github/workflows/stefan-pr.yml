@@ -1,0 +1,168 @@
+name: Stefan fork PR
+
+# Upstream's pr.yml delegates to paperclipai/paperclip's trusted workflow on the
+# upstream AWS runner group, so it never runs in this fork. This workflow runs
+# the same lanes (typecheck, Runner static/Rust/Vitest, grouped general tests)
+# on GitHub-hosted runners for pull requests into the deployment branch.
+on:
+  pull_request:
+    branches: [deploy/stefan-production]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stefan-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+
+jobs:
+  typecheck:
+    name: Typecheck
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Free disposable runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+      - name: Install the pinned Runner Rust toolchain
+        working-directory: packages/paperclip-runner
+        run: rustup toolchain install && rustup show active-toolchain
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+
+  runner:
+    name: Runner (${{ matrix.lane }})
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: static checks
+            command: check:static
+          - lane: rust
+            command: check:runner
+          - lane: vitest 1/2
+            command: test:typescript:vitest --shard=1/2
+            build_rust: true
+          - lane: vitest 2/2
+            command: test:typescript:vitest --shard=2/2
+            build_rust: true
+    steps:
+      - name: Free disposable runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+      - name: Install the pinned Runner Rust toolchain
+        working-directory: packages/paperclip-runner
+        run: rustup toolchain install && rustup show active-toolchain
+      - run: pnpm install --frozen-lockfile
+      - name: Build Runner debug binaries for transport tests
+        if: matrix.build_rust
+        run: pnpm --filter @paperclipai/paperclip-runner run build:rust
+      - run: pnpm --filter @paperclipai/paperclip-runner ${{ matrix.command }}
+
+  general:
+    name: General tests (${{ matrix.label }})
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "server 1/12", group: general-server-without-chat, shard_index: 0, shard_count: 12 }
+          - { label: "server 2/12", group: general-server-without-chat, shard_index: 1, shard_count: 12 }
+          - { label: "server 3/12", group: general-server-without-chat, shard_index: 2, shard_count: 12 }
+          - { label: "server 4/12", group: general-server-without-chat, shard_index: 3, shard_count: 12 }
+          - { label: "server 5/12", group: general-server-without-chat, shard_index: 4, shard_count: 12 }
+          - { label: "server 6/12", group: general-server-without-chat, shard_index: 5, shard_count: 12 }
+          - { label: "server 7/12", group: general-server-without-chat, shard_index: 6, shard_count: 12 }
+          - { label: "server 8/12", group: general-server-without-chat, shard_index: 7, shard_count: 12 }
+          - { label: "server 9/12", group: general-server-without-chat, shard_index: 8, shard_count: 12 }
+          - { label: "server 10/12", group: general-server-without-chat, shard_index: 9, shard_count: 12 }
+          - { label: "server 11/12", group: general-server-without-chat, shard_index: 10, shard_count: 12 }
+          - { label: "server 12/12", group: general-server-without-chat, shard_index: 11, shard_count: 12 }
+          - { label: "chat 1/3", group: general-chat, shard_index: 0, shard_count: 3 }
+          - { label: "chat 2/3", group: general-chat, shard_index: 1, shard_count: 3 }
+          - { label: "chat 3/3", group: general-chat, shard_index: 2, shard_count: 3 }
+          - { label: "workspaces-a 1/2", group: general-workspaces-a, shard_index: 0, shard_count: 2 }
+          - { label: "workspaces-a 2/2", group: general-workspaces-a, shard_index: 1, shard_count: 2 }
+          - { label: "workspaces-b", group: general-workspaces-b }
+          - { label: "workspaces-c", group: general-workspaces-c }
+    steps:
+      - name: Free disposable runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+      - name: Install the pinned Runner Rust toolchain
+        working-directory: packages/paperclip-runner
+        run: rustup toolchain install && rustup show active-toolchain
+      - run: pnpm install --frozen-lockfile
+      - name: Run grouped general test suites
+        env:
+          GROUP: ${{ matrix.group }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
+        run: |
+          if [ -n "$SHARD_COUNT" ]; then
+            pnpm test:run:general -- --group "$GROUP" --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT"
+          else
+            pnpm test:run:general -- --group "$GROUP"
+          fi
+
+  kubernetes-plugin:
+    name: Kubernetes sandbox plugin
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+      - run: pnpm install --frozen-lockfile
+      # Sandbox providers are standalone packages outside the root workspace.
+      - name: Install the standalone plugin
+        working-directory: packages/plugins/sandbox-providers/kubernetes
+        run: pnpm install --ignore-workspace --no-lockfile
+      - name: Typecheck and test
+        working-directory: packages/plugins/sandbox-providers/kubernetes
+        run: pnpm typecheck && pnpm test

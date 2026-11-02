@@ -420,6 +420,103 @@ function tarSpawnEnv(): NodeJS.ProcessEnv {
   };
 }
 
+// One tar diagnostic per entry: `tar: <entry>: <diagnostic>[: <reason>]`.
+// GNU tar ("Cannot readlink", "Cannot open", "file changed as we read it")
+// and bsdtar ("Couldn't read link data", "Can't open") use this shape.
+const TAR_ENTRY_DIAGNOSTIC =
+  /^(?:\S*\/)?(?:bsd)?tar: (.+?): ((?:Cannot|Can't|Couldn't) [^:]+|Read error[^:]*|[Ff]ile changed as we read it|File removed before we read it|File shrank by \d+ bytes[^:]*)(?:: (.*))?$/;
+// Diagnostics for an entry tar could not put into the archive at all. Each one
+// guarantees a non-zero tar exit, so the upload can never succeed after it.
+const TAR_UNARCHIVABLE_ENTRY = /^(?:Cannot|Can't|Couldn't|Read error)\b/;
+const TAR_TRAILER = /Exiting with failure status due to previous errors|Error exit delayed from previous errors/;
+const TAR_FAILURE_MAX_KINDS = 6;
+const TAR_FAILURE_EXAMPLES_PER_KIND = 5;
+const TAR_FAILURE_MAX_OTHER_LINES = 5;
+const TAR_STDERR_MAX_CHARS = 256 * 1024;
+
+function parseTarEntryDiagnostic(line: string): { entry: string; kind: string; unarchivable: boolean } | null {
+  if (line.includes(": Warning: ")) return null;
+  const match = TAR_ENTRY_DIAGNOSTIC.exec(line);
+  if (!match) return null;
+  const [, entry, diagnostic, reason] = match;
+  // `Read error at byte N, while reading M bytes` differs per entry; group it by reason only.
+  const label = diagnostic.startsWith("Read error") ? "Read error" : diagnostic;
+  return {
+    entry,
+    kind: reason ? `${label}: ${reason}` : label,
+    // `-` is the archive stream itself: a write error there means the SSH side
+    // went away, and its own exit status and stderr carry the cause.
+    unarchivable: entry !== "-" && TAR_UNARCHIVABLE_ENTRY.test(diagnostic),
+  };
+}
+
+/**
+ * True when a tar stderr line names an entry tar could not archive. Such an
+ * archive is always rejected, so the caller may stop streaming immediately.
+ */
+export function isUnarchivableTarDiagnostic(line: string): boolean {
+  return parseTarEntryDiagnostic(line.trim())?.unarchivable === true;
+}
+
+/**
+ * Bounded, grouped description of a failed `tar -c` used for a workspace or
+ * asset upload. Raw tar stderr repeats one line per entry and can be tens of
+ * kilobytes for a tree full of unreadable symlinks; the run error must stay
+ * readable and point at the cause.
+ */
+export function summarizeTarArchiveFailure(input: {
+  stderr: string;
+  localDir: string;
+  label?: string;
+  exitCode?: number | null;
+  stoppedEarly?: boolean;
+}): string {
+  const kinds = new Map<string, string[]>();
+  const other: string[] = [];
+  let entries = 0;
+  let unarchivable = 0;
+  for (const raw of input.stderr.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || TAR_TRAILER.test(line)) continue;
+    const parsed = parseTarEntryDiagnostic(line);
+    if (!parsed) {
+      if (other.length < TAR_FAILURE_MAX_OTHER_LINES) other.push(line);
+      continue;
+    }
+    entries += 1;
+    if (parsed.unarchivable) unarchivable += 1;
+    const examples = kinds.get(parsed.kind) ?? [];
+    examples.push(parsed.entry);
+    kinds.set(parsed.kind, examples);
+  }
+  const subject = `${input.label ?? "directory"} "${input.localDir}"`;
+  const plural = (count: number) => `${count} ${count === 1 ? "entry" : "entries"}`;
+  const headline = input.stoppedEarly
+    ? `Upload of ${subject} over SSH was stopped: tar could not archive ${plural(unarchivable)}. ` +
+      "The rest of the tree was not uploaded or checked, so more entries may be affected."
+    : entries > 0
+      ? `Upload of ${subject} over SSH failed: tar reported ${plural(entries)}` +
+        `${unarchivable > 0 ? ` (${unarchivable} could not be archived)` : ""}` +
+        `${input.exitCode != null ? ` and exited with code ${input.exitCode}` : ""}.`
+      : `Upload of ${subject} over SSH failed: tar exited with code ${input.exitCode ?? -1}.`;
+  const lines = [headline];
+  for (const [kind, examples] of [...kinds.entries()].slice(0, TAR_FAILURE_MAX_KINDS)) {
+    const shown = examples.slice(0, TAR_FAILURE_EXAMPLES_PER_KIND).join(", ");
+    const more = examples.length > TAR_FAILURE_EXAMPLES_PER_KIND ? `, and ${examples.length - TAR_FAILURE_EXAMPLES_PER_KIND} more` : "";
+    lines.push(`- ${kind}: ${plural(examples.length)}, e.g. ${shown}${more}`);
+  }
+  if (kinds.size > TAR_FAILURE_MAX_KINDS) lines.push(`- ${kinds.size - TAR_FAILURE_MAX_KINDS} more kinds of tar diagnostics`);
+  for (const line of other) lines.push(`- ${line}`);
+  if ([...kinds.keys()].some((kind) => /^(?:Cannot readlink|Couldn't read link)/.test(kind) && /Operation not permitted|Permission denied/.test(kind))) {
+    lines.push(
+      "The local filesystem refused to read these symbolic links. SSHFS 3.7.6 and later reject absolute and '..' " +
+        "symlink targets by default (contain_symlinks): mount the source with -o no_contain_symlinks, point the " +
+        "workspace at a local directory, or execute it on the host that owns it instead of copying it.",
+    );
+  }
+  return lines.join("\n");
+}
+
 // Converts a tar `--exclude` pattern into a regexp for the local-size estimate.
 // We only need approximate fidelity here (the estimate feeds a clamped percent),
 // so we support the literal names and `*`/`?` globs used in practice.
@@ -1467,7 +1564,20 @@ export async function syncDirectoryToSsh(input: {
       }
       settled = true;
       if ((tarExitCode ?? 0) !== 0) {
-        reject(new Error(tarStderr.trim() || `tar exited with code ${tarExitCode ?? -1}`));
+        const tarFailure = tarStderr.trim()
+          ? summarizeTarArchiveFailure({
+            stderr: tarStderr,
+            localDir: input.localDir,
+            label: input.progressLabel,
+            exitCode: tarExitCode,
+          })
+          : `tar exited with code ${tarExitCode ?? -1}`;
+        // A remote failure (auth, mkdir, disk full) surfaces locally as a tar
+        // write error on `-`; keep the SSH side's own explanation with it.
+        const sshFailure = (sshExitCode ?? 0) !== 0 && sshStderr.trim()
+          ? `\nssh exited with code ${sshExitCode}: ${sshStderr.trim().slice(0, 2048)}`
+          : "";
+        reject(new Error(`${tarFailure}${sshFailure}`));
         return;
       }
       if ((sshExitCode ?? 0) !== 0) {
@@ -1487,14 +1597,34 @@ export async function syncDirectoryToSsh(input: {
       reject(error);
     };
 
+    // The pipe breaks whenever ssh exits first: an early stop below, failed
+    // authentication or a remote error. Both exit statuses already report that
+    // outcome; an unhandled EPIPE here would escape as an uncaught stream error.
+    ssh.stdin?.on("error", () => undefined);
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
     } else {
       tar.stdout?.pipe(ssh.stdin ?? null);
     }
+    let tarStderrPartialLine = "";
     tar.stderr?.on("data", (chunk) => {
-      tarStderr += String(chunk);
+      const text = String(chunk);
+      if (tarStderr.length < TAR_STDERR_MAX_CHARS) {
+        tarStderr += text.slice(0, TAR_STDERR_MAX_CHARS - tarStderr.length);
+      }
+      const lines = (tarStderrPartialLine + text).split("\n");
+      tarStderrPartialLine = (lines.pop() ?? "").slice(-4096);
+      if (lines.some(isUnarchivableTarDiagnostic)) {
+        // tar exits non-zero after any such entry, and that rejects the upload.
+        // Stop now instead of streaming the rest of the tree to discard it.
+        fail(new Error(summarizeTarArchiveFailure({
+          stderr: tarStderr,
+          localDir: input.localDir,
+          label: input.progressLabel,
+          stoppedEarly: true,
+        })));
+      }
     });
     ssh.stderr?.on("data", (chunk) => {
       sshStderr += String(chunk);

@@ -4,8 +4,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isStoredIsolatedTaskDirectory, materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
-import type { ExecutionWorkspace } from "@paperclipai/shared";
+import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
 import { prepareSandboxManagedRuntime, type SandboxManagedRuntimeClient, type SandboxSyncOperation } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 const execFile = promisify(execFileCallback);
@@ -52,23 +51,6 @@ describe("isolated task directories", () => {
     return { companyId: "company-1", issueId: "issue-1" };
   }
 
-  it.each([undefined, "retry-1"])("recognizes only the task-owned plain directory on continuation (attempt %s)", async attemptId => {
-    const identity = await setup();
-    const cwd = await materializeIsolatedTaskDirectory({ ...identity, attemptId });
-    const workspace = { companyId: identity.companyId, sourceIssueId: identity.issueId, mode: "isolated_workspace",
-      strategyType: "project_primary", projectWorkspaceId: null, repoUrl: null, cwd } as ExecutionWorkspace;
-    const input = { ...identity, workspace, workspaceStrategies: [undefined, {}, { type: "project_primary" }] };
-    expect(isStoredIsolatedTaskDirectory(input)).toBe(true);
-    for (const patch of [{ companyId: "other-company" }, { sourceIssueId: "other-task" },
-      { mode: "shared_workspace" }, { strategyType: "git_worktree" }, { projectWorkspaceId: "repository" },
-      { repoUrl: "https://example.test/repo.git" }, { cwd: path.dirname(cwd) }, { cwd: `${cwd}/child` }]) {
-      expect(isStoredIsolatedTaskDirectory({ ...input, workspace: { ...workspace, ...patch } as ExecutionWorkspace })).toBe(false);
-    }
-    for (const strategy of [{ type: "git_worktree" }, { existingBranch: "main" }, { provisionCommand: "setup" }]) {
-      expect(isStoredIsolatedTaskDirectory({ ...input, workspaceStrategies: [strategy] })).toBe(false);
-    }
-  });
-
   it("retains a task's files across turns without sharing them with another task or company", async () => {
     const identity = await setup();
     const cwd = await materializeIsolatedTaskDirectory(identity);
@@ -90,6 +72,37 @@ describe("isolated task directories", () => {
     await expect(materializeIsolatedTaskDirectory({ ...identity, issueId: "issue-2" }))
       .rejects.toThrow("not a private directory");
   });
+
+  it("reuses only the exact private task directory, including a prior fresh attempt", async () => {
+    const identity = await setup();
+    for (const attemptId of [undefined, "previous-attempt"]) {
+      const cwd = await materializeIsolatedTaskDirectory({ ...identity, attemptId });
+      await writeFile(path.join(cwd, "saved.txt"), "preserved");
+      expect(await materializeIsolatedTaskDirectory({ ...identity, reuseCwd: cwd })).toBe(cwd);
+      expect(await readFile(path.join(cwd, "saved.txt"), "utf8")).toBe("preserved");
+    }
+  });
+
+  it.each(["other-company", "other-issue", "outside", "traversal", "missing", "symlink"])(
+    "does not admit or recreate a reused task directory with %s binding", async change => {
+      const identity = await setup();
+      const cwd = await materializeIsolatedTaskDirectory({ ...identity, attemptId: "prior-attempt" });
+      await writeFile(path.join(cwd, "saved.txt"), "preserved");
+      let reuseCwd = cwd;
+      if (change === "other-company") reuseCwd = cwd.replace(identity.companyId, "other-company");
+      if (change === "other-issue") reuseCwd = cwd.replace(identity.issueId, "other-issue");
+      if (change === "outside") reuseCwd = path.dirname(path.dirname(cwd));
+      if (change === "traversal") reuseCwd = `${cwd}/../prior-attempt`;
+      if (change === "missing") reuseCwd = path.join(path.dirname(cwd), "missing-attempt");
+      if (change === "symlink") {
+        reuseCwd = path.join(path.dirname(cwd), "linked-attempt");
+        await symlink(cwd, reuseCwd);
+      }
+      await expect(materializeIsolatedTaskDirectory({ ...identity, reuseCwd })).rejects.toThrow();
+      if (change === "missing") await expect(readFile(path.join(reuseCwd, "saved.txt"))).rejects.toThrow();
+      expect(await readFile(path.join(cwd, "saved.txt"), "utf8")).toBe("preserved");
+    },
+  );
 
   it("round-trips sandbox output into the task directory and stages it on the next turn", async () => {
     const identity = await setup();

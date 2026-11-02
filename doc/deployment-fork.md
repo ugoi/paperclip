@@ -2,14 +2,16 @@
 
 The `deploy/stefan-production` branch follows upstream `paperclipai/paperclip`
 and carries reviewed changes for a Linux control plane with Linux and macOS SSH
-workers. It includes upstream PR #17073 at `306781d2a6fcfa4f7f38cd1208114cbbdaba215f`.
-It is a downstream build, not an official Paperclip release.
+workers. It is a downstream build, not an official Paperclip release. Upstream
+PR #17073 was carried until 2026-11-01; upstream replaced it with #17799.
 
 ## Change and verification policy
 
-Fetch upstream and merge `upstream/master` into this branch. Resolve conflicts,
-review the resulting diff and rerun the affected regression tests before building
-or deploying. A Git pull alone does not upgrade a running container.
+Fetch upstream and rebuild the fork on `upstream/master`: create an update branch
+from upstream and re-apply the downstream commits one by one, dropping those that
+upstream has replaced. Review the resulting diff and rerun the affected regression
+tests before building or deploying. A Git pull alone does not upgrade a running
+container. `UPDATE_REPORT.md` records the decisions of the latest update.
 
 The process-exit regression was first reproduced using compiled code copied from
 the unmodified deployed `f3af9887ca796117d54280a04e2ed08bc5e76a75` image. Real owned
@@ -79,21 +81,13 @@ configuration, then deploy matching Core/worker artifacts. Check health, native
 task completion, continuation and cancellation on every changed platform. Keep
 the prior image, database backup and adapter configuration available for rollback.
 
-## Upstream snapshot integration: 2026-10-23
+## Upstream snapshot integration: 2026-11-01
 
-The maintenance update merges upstream master at
-`75fcb0b3fca427774cff8f4f7ed43de9ab7f626b`. It retains the downstream process
-identity, cleanup, remote launch readiness, preconfigured SSH home, trusted-host
-Codex, and nested status-filter fixes. The upstream optional working-directory
-path and plugin execution paths keep their separate authority checks.
-
-Upstream and this fork independently assigned Copilot profile versions 53–55.
-The upstream historical fixtures keep their canonical filenames. The historical
-fork fixtures are preserved with `-stefan-identity.json` names, and their existing
-regression assertions remain. The merged implementation has a new profile 59
-identity; neither historical digest is reused to authorize the new source.
-
-This is a full Core and runner update. The UI-only image recipe is not suitable
-for it. Build both Linux and Darwin runners from the same final source, verify
-their embedded metadata and package/vendor copies, then stage a separate
-coordinated deployment. Source integration is not production acceptance.
+The fork was rebuilt on upstream master `1a6017d6460267ad89d7e1784e2b521c28d8e9ac`.
+Upstream #17799 replaced the carried #17073; the Darwin generation receipt now
+sits in front of upstream's Linux process check. Upstream no longer hashes
+Paperclip source into ACPX profile digests, so fork source changes no longer
+need Copilot profile refreshes; the fork's historical profile 53–59 fixtures were
+not carried forward. Upstream #17878 replaced the fork's task-directory
+continuation. Upstream Hermes PRs #18434 and #18528 are included until upstream
+merges them. See `UPDATE_REPORT.md` for every decision, migrations and rollout.

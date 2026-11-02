@@ -494,7 +494,7 @@ describe("Codex security configuration", () => {
 describe("explicit trusted host Codex permissions", () => {
   const source = { HOME: "/Users/operator", CODEX_HOME: "/Users/operator/worker-home", PAPERCLIP_RUNNER_HOME_MODE: "preconfigured" };
   it("uses full host access only for the explicit selected capability", () => {
-    const args = createIsolatedCodexAppServerArgs(source, [], undefined, [], true);
+    const args = createIsolatedCodexAppServerArgs(source, [], undefined, [], false, true);
     expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(args.join("\n")).toContain('default_permissions="paperclip-runner-trusted-host"');
     expect(args.join("\n")).toContain('permissions.paperclip-runner-trusted-host.filesystem={":root"="write"}');
@@ -503,7 +503,7 @@ describe("explicit trusted host Codex permissions", () => {
     expect(createIsolatedCodexAppServerArgs({ ...source, PAPERCLIP_RUNNER_TRUSTED_HOST_FULL_ACCESS: "1" })).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   });
   it("requires a preconfigured home and retains the plan permission profile", () => {
-    expect(() => createIsolatedCodexAppServerArgs({}, [], undefined, [], true)).toThrow("trusted_host_requires_preconfigured_home");
+    expect(() => createIsolatedCodexAppServerArgs({}, [], undefined, [], false, true)).toThrow("trusted_host_requires_preconfigured_home");
     expect(createSecuredCodexThreadParams("/workspace", "default", true, false, source, true).permissions).toBe("paperclip-runner-trusted-host");
     expect(createSecuredCodexThreadParams("/workspace", "plan", true, false, source, true).permissions).toBe("paperclip-runner-workspace-read-only");
   });
