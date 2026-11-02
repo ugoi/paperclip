@@ -55,6 +55,14 @@ const sshEnvironmentConfigSchema = z.object({
     .nullable()
     .transform((value) => (value && value.length > 0 ? value : null)),
   strictHostKeyChecking: z.boolean().optional().default(true),
+  // Core-path prefixes that already exist on the SSH host under another path. A
+  // project workspace below one of them runs in place on the host (no upload/restore).
+  inPlaceWorkspaceAliases: z
+    .array(z.object({
+      path: z.string().trim().refine((value) => value.startsWith("/"), "Alias path must be absolute."),
+      target: z.string().trim().refine((value) => value.startsWith("/"), "Alias target must be absolute."),
+    }).strict())
+    .optional(),
 }).strict();
 
 const sshEnvironmentConfigProbeSchema = sshEnvironmentConfigSchema.extend({

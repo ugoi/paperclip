@@ -20,6 +20,8 @@ export interface SshEnvironmentConfig {
   privateKeySecretRef: EnvSecretRefBinding | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
+  /** Core-path prefixes mirrored on the SSH host; matching project workspaces run in place. */
+  inPlaceWorkspaceAliases?: Array<{ path: string; target: string }>;
 }
 
 export type SandboxEnvironmentProvider = "fake" | (string & {});

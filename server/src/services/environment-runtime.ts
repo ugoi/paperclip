@@ -1197,6 +1197,9 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
           username: parsed.config.username,
           remoteWorkspacePath: parsed.config.remoteWorkspacePath,
           remoteCwd,
+          ...(parsed.config.inPlaceWorkspaceAliases?.length
+            ? { workspaceRealization: { inPlaceWorkspaceAliases: parsed.config.inPlaceWorkspaceAliases } }
+            : {}),
         },
       });
     },
