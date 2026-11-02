@@ -634,6 +634,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           adapterKey: "claude",
           timeoutSec,
           workspaceLocalDir: cwd,
+          ...(executionTarget?.workspaceRealization?.mode === "in_place"
+            ? { workspaceRemoteDir: executionTarget.workspaceRealization.authoritativeRoot, syncWorkspace: false }
+            : {}),
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
           onProgress: (line) => onLog("stdout", line),
