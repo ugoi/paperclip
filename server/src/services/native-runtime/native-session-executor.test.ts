@@ -1106,6 +1106,8 @@ fs.readFileSync = function(path, ...args) {
     const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     const execute = vi.fn(async (input: { command: string; args?: string[] }) => {
       const label = input.args?.[2];
+      // Keep the fork's prerequisite probes out of this test's 5 s health window.
+      if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) return ok;
       if (label === "paperclip-runner-launch") {
         child = spawn(process.execPath, [fixture, "--runner-id", "runner-health"], { stdio: ["ignore", "pipe", "pipe"] });
         await new Promise<void>((resolve, reject) => {
