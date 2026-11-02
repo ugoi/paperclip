@@ -1,8 +1,9 @@
 # Upstream update 2026-11-01: `update/upstream-20261101`
 
 **Status: prepared, not deployed.** Do not merge before Stefan approves. Merging
-pushes `deploy/stefan-production`, which starts the `Stefan production image`
-workflow (it builds and publishes an image candidate; it does not deploy).
+pushes `deploy/stefan-production`, which would start the `Stefan production image`
+workflow (it builds and publishes an image candidate; it does not deploy) — but
+GitHub Actions currently starts no runs in this fork (see Tests).
 Nothing was deployed or restarted, no migration was run, and no production
 configuration was changed. Production reads used `GET` only.
 
@@ -12,7 +13,7 @@ configuration was changed. Production reads used `GET` only.
 | Previous fork | `deploy/stefan-production` `8c4531520` (production runs `da248c1ff`, runtime-identical) |
 | Previous upstream | `75fcb0b3fca427774cff8f4f7ed43de9ab7f626b` (2026-10-23), 539 upstream commits ago |
 | Method | New branch from upstream master; fork commits re-applied one by one with `cherry-pick -x` |
-| Result | 21 fork commits re-applied (9 adapted, 3 partly), 4 dropped as superseded or obsolete, 3 upstream Hermes commits added, 3 new fixes |
+| Result | 21 fork commits re-applied (8 adapted, 2 partly, 11 clean); 2 dropped (#17073, profile-only `cb6476ee1`) plus 2 merge commits not replayed, 3 upstream Hermes commits added, 2 fixes for tonight's live problems, 1 CI workflow, 6 integration fixes found by the checks (1 product, 5 test) |
 | Database | 46 upstream migrations `0377`–`0422`; one can fail on duplicate data (preflight query below) |
 
 ## Summary
@@ -33,7 +34,14 @@ configuration was changed. Production reads used `GET` only.
   view on Core + sshfs 3.7.6 `contain_symlinks`); fail-fast/bounded-error/cleanup fix
   on the branch; real fix (in-place SSH execution) is a follow-up. The Engineer and
   CEO were still failing this way at 00:37 CET — needs an operator decision.
-- **Live problem (a), CTO stuck in `pausing`:** see its section.
+- **Live problem (a), CTO stuck in `pausing`:** two historical cancelled runs can
+  never produce the stop proof the pause gate demands (an SSH lease without a
+  termination receipt from 2026-10-23, and tonight's `claude_local` retry cancelled
+  before it entered the adapter). Not caused by the host rename. Guarded SQL
+  recovery prepared for approval; the branch adds an audited operator attestation
+  endpoint, a stop-blocker view and a receipt for pre-adapter cancellations.
+- **CI:** GitHub Actions does not start any run in the fork since 2026-10-22; all
+  test results are local (Linux VM202 under heavy load, plus a clean macOS run).
 
 ## Commit-by-commit decisions
 
@@ -88,14 +96,151 @@ upstream merges a different version.
 
 | Commit | Change |
 | --- | --- |
-| `8447e1e44` | test(ui): the re-applied nested status filter test mocked the old single `parentId` child read; upstream #17756 batches hierarchy reads through `parentIds`. Test-only. |
+| `8447e1e44` | test(ui): the re-applied nested status filter test mocked the old single `parentId` child read; upstream #17756 batches hierarchy reads through `parentIds`. Test only. |
 | `b3de43884` | fix(ssh): fail fast with a bounded error on unreadable workspace uploads, handle `EPIPE`, remove the partial per-run copy (live problem b). |
-| docs commit | `UPDATE_REPORT.md`, `doc/deployment-fork.md` update. |
+| `76ef882bd` | docs: this report and `doc/deployment-fork.md`. |
+| `b6184395a` | `-s ours` merge of the old `deploy/stefan-production` (`8c4531520`): records it as an ancestor so the PR merges without conflicts; takes no content (tree verified unchanged). |
+| `2a8cb3364` | ci: `Stefan fork PR` workflow on GitHub-hosted runners (upstream `pr.yml` only runs on upstream's AWS runners). |
+| `4427c8eeb` | fix(lifecycle): stop-blocker inspection, legacy pre-adapter stop receipt, audited operator stop attestation (live problem a). |
+| `120268c9a` | test: duplicate `environmentLeases` import from re-applying `da248c1ff` broke the executor test file. |
+| `757382cf0` | fix(native): missing import of `REMOTE_RECOVERY_PROCESS_FINGERPRINT_CHECK_SCRIPT` in the re-applied signal path (found by server `tsc`). |
+| `9a07785c4` | test(native): upstream launcher tests taught about the fork's process-probe prerequisite and upstream's Node runner-id match. |
+| `3a3b41ba3` | test(native): upstream's fake-`/proc` exit-receipt test answers the fork's prerequisite probe (failed on Linux only). |
+| `d589ff555` | test(native): keep the fork's prerequisite probes out of upstream's 5 s health-outage window (Linux timing under load). |
+| final docs commit | report update with final results. |
 
 ## Live problem (a): CTO stuck in `pausing`
 
-_Investigation in progress at the time of the first push; this section is updated
-before the final report._
+Investigation was read-only (API `GET`, `ps`/`who -b` on VM202). Re-checked at
+01:35 CET: CTO `5dfad677-bc96-4750-97c8-87f29317010f` is `status=paused`,
+`lifecycleState=pausing`, `lifecycleHolds=[]`, `lifecycleVersion=6`,
+`lifecycleError=null`, `pausedAt=2026-11-01T22:10:41Z`.
+
+**Why it never completes.** The lifecycle worker completes `pausing` only when
+`stopInvocationsForAgents()` → `agentExecutionsHaveStopped()`
+(`server/src/services/agent-execution-stop.ts`, identical in fork and upstream)
+finds stop proof for **every cancelled run in the agent's history** (651 runs). A
+"pending" host step is deferred by 2 s with no error, no attempt cap and no
+timeout — it fails closed by design, silently. Two runs can never produce proof:
+
+| | Run | Why it blocks |
+| --- | --- | --- |
+| A | `291cd527-78cf-42ac-b685-3a6004674880` (2026-10-23, native `paperclip_runner`, cancelled `issue_reassigned`) | Its SSH lease `28c3f2d6-af6a-4f1d-bb0d-fdb7d649fe3a` on the old environment `2a7e5bc1` is `expired`, `cleanupStatus=null`, no `remoteExecutionTermination` receipt. Only a live native Runner close writes that receipt; expired leases are never retried. Blocking since 2026-10-23 21:21 UTC; tonight was the first pause since. |
+| B | `dfeeb9a3-8404-445b-a627-d5cd0f505cb8` (tonight, legacy `claude_local`, automatic retry of failed `9c1b8864`) | The pause cancelled it during startup: no lease, no PID, no `adapter.invoke`, `executionStage=settled`. For a PID-less legacy run the gate needs `executionCancellation.state=acknowledged` or a non-conversation adapter; `claude_local` is a conversation adapter, so no proof path exists. |
+
+**The Tailscale rename is not the cause:** no stop path for these runs contacts a
+host. `agent-services` and `agents` are the same machine (same pinned host key).
+
+**Latent, same mechanism (not blocking yet):**
+
+- Every Stop/cancel of a *running* `claude_local` run over SSH leaves an SSH lease
+  without a receipt (the SSH driver never writes one), so that agent's next pause
+  or terminate will hang the same way. Affects CEO, QA, Claude Engineer and the
+  Foehn agents.
+- CEO `d99bcd35` has lease `9d0a42ce-9928-4492-8320-78be0459bc4b` (env `2a7e5bc1`)
+  in `pending_cleanup` / `cleanupStatus=failed` against the unreachable old host.
+  **Do not pause or terminate the CEO** until that lease is repaired.
+- Do not delete environment `2a7e5bc1`: leases keep their history with
+  `environment_id=NULL`, and the blockers stay.
+
+### Safe recovery today (needs approval; not executed)
+
+Evidence (read-only): VM202 booted 2026-10-25 21:56 CET, after run A ended
+(2026-10-23 21:21:53 UTC); no process for `291cd527`, `dfeeb9a3` or `9c1b8864`
+exists; run B never got a runtime directory. This mirrors the STE-334 recovery of
+2026-10-23 (run `cfba53cc` acknowledged by SQL, CTO resumed).
+
+1. Decide the end state. Holds are empty, so once the stop completes the CTO goes
+   `resuming` → `ready` and picks up queued work. To keep it paused, call
+   `POST /api/agents/5dfad677-bc96-4750-97c8-87f29317010f/pause` first.
+2. On VM203 as the database owner, in a maintenance window, run the read-only
+   diagnostic query from `cto-pausing-investigation.md` §5 (it mirrors the stop
+   gate). Expected: exactly one `remote_termination_unconfirmed` row (A) and one
+   `legacy_stop_unconfirmed` row (B). Anything else: stop and re-assess.
+3. One guarded transaction (each `UPDATE` must report `UPDATE 1`, re-run the
+   diagnostic inside the transaction, expect 0 rows, else `ROLLBACK`):
+
+   ```sql
+   BEGIN;
+   SELECT id, lifecycle_state, lifecycle_holds, lifecycle_version
+     FROM agents WHERE id = '5dfad677-bc96-4750-97c8-87f29317010f' FOR UPDATE;
+
+   UPDATE environment_leases
+      SET cleanup_status = 'success',
+          metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('remoteExecutionTermination', jsonb_build_object(
+            'schema', 'paperclip.remote-termination.v1',
+            'companyId', company_id::text, 'runId', heartbeat_run_id::text, 'leaseId', id::text,
+            'provider', provider, 'providerLeaseId', provider_lease_id, 'state', 'stopped',
+            'confirmedAt', now(), 'proof', 'operator_verified_host_reboot',
+            'verification', 'VM202 (= agent-services, same host key) booted 2026-10-25T20:56Z, after run end 2026-10-23T21:21:53Z',
+            'recoveryTask', 'cto-pausing-2026-11-01')),
+          updated_at = now()
+    WHERE id = '28c3f2d6-af6a-4f1d-bb0d-fdb7d649fe3a'
+      AND heartbeat_run_id = '291cd527-78cf-42ac-b685-3a6004674880'
+      AND provider = 'ssh' AND status = 'expired' AND released_at IS NOT NULL
+      AND cleanup_status IS NULL AND metadata->'remoteExecutionTermination' IS NULL;
+
+   UPDATE heartbeat_runs
+      SET result_json = coalesce(result_json, '{}'::jsonb) || jsonb_build_object('executionCancellation', jsonb_build_object(
+            'state', 'acknowledged', 'acknowledgedAt', now(), 'proof', 'operator_verified_no_adapter_entry',
+            'verification', 'Pause cancelled the run during startup: no environment lease, no process identity, no adapter.invoke event; executor settled 2026-11-01T22:12:43Z',
+            'originalWorkerAcknowledgmentMissing', true, 'recoveryTask', 'cto-pausing-2026-11-01')),
+          updated_at = now()
+    WHERE id = 'dfeeb9a3-8404-445b-a627-d5cd0f505cb8'
+      AND agent_id = '5dfad677-bc96-4750-97c8-87f29317010f'
+      AND status = 'cancelled' AND runtime_mode = 'legacy' AND execution_stage = 'settled'
+      AND process_pid IS NULL AND process_group_id IS NULL AND process_started_at IS NULL
+      AND result_json->'executionCancellation' IS NULL
+      AND NOT EXISTS (SELECT 1 FROM environment_leases WHERE heartbeat_run_id = 'dfeeb9a3-8404-445b-a627-d5cd0f505cb8')
+      AND NOT EXISTS (SELECT 1 FROM heartbeat_run_events WHERE run_id = 'dfeeb9a3-8404-445b-a627-d5cd0f505cb8'
+                        AND event_type = 'adapter.invoke');
+   COMMIT;
+   ```
+
+4. Wake the worker: `POST /api/agents/5dfad677-bc96-4750-97c8-87f29317010f/lifecycle/retry`
+   (or wait 2–10 minutes). Expect `lifecycleState=ready` (version 8) or `paused`
+   if step 1 re-paused. If it is still `pausing` after ~10 minutes the remaining
+   blocker is in-memory in Core; only a Core restart clears that — not while the
+   experiments run.
+5. Undo, if ever needed: remove `metadata->'remoteExecutionTermination'` /
+   `result_json->'executionCancellation'` and reset `cleanup_status` to `NULL`.
+
+Not recommended: setting `agents.lifecycle_state` directly (skips wakeup
+cancellation and leaves both gaps), deleting environment `2a7e5bc1`, or a Core
+restart alone (creates no evidence).
+
+### Fix on this branch: `4427c8eeb` (fix(lifecycle): let operators settle unprovable stops …)
+
+- `inspectAgentExecutionStop()` returns the blocking runs/leases with a reason;
+  `agentExecutionsHaveStopped()` keeps its semantics on top of it.
+- The heartbeat executor records `legacyStartupSettledAt` on a cancelled legacy run
+  that never entered the adapter (no lease, no PID, no `adapter.invoke`) — this
+  prevents case B in future.
+- `POST /api/agents/:id/lifecycle/attest-stopped` (board + **instance admin**, body
+  `{runIds, confirm: "processes_stopped", note}`, audited as
+  `agent.execution_stop_attested`) records an operator stop attestation on exact
+  cancelled runs while the agent is pausing/terminating. It requires settled lease
+  cleanup, never overrides a live local PID or controller lease, and is not a
+  provider receipt (grants no continuation or reconstruction authority).
+- `GET /api/agents/:id/lifecycle/stop-blockers` shows why a stop is pending.
+
+After deployment the CTO recovery becomes, without SQL:
+`GET …/lifecycle/stop-blockers`, then
+`POST …/lifecycle/attest-stopped {"runIds":["291cd527-78cf-42ac-b685-3a6004674880","dfeeb9a3-8404-445b-a627-d5cd0f505cb8"],"confirm":"processes_stopped","note":"VM202 rebooted 2026-10-25 after 291cd527; dfeeb9a3 never entered the adapter"}`.
+The CEO lease `9d0a42ce` still needs its cleanup settled first (the endpoint
+deliberately refuses unsettled leases).
+
+Tests: 4 new embedded-PostgreSQL cases (`operator-stop-attestation.test.ts`); with
+the patch, `agent-lifecycle` `lifecycle.test.ts` (66) + `driver-scope.test.ts` (1)
++ the 4 new = 71/71 passed on upstream master (scratch worktree). Results on this
+branch: see the test table. Not covered by tests: the heartbeat executor write
+path and the two routes (no route test).
+
+Follow-ups: the SSH driver could write a receipt for legacy runs once the adapter
+child exited after a confirmed remote kill (today legacy SSH runs have no receipt
+producer at all, so the endpoint is their only way out); show "waiting for stop
+proof (run X)" in the UI instead of `lifecycleError=null`; repair CEO lease
+`9d0a42ce`.
 
 ## Live problem (b): `claude_local` over SSH uploads the server-side cwd
 
@@ -259,18 +404,22 @@ configuration were not changed.
 
 1. **Wait** until the overnight hair dryer experiments and all other runs are
    finished. Enable task drain; confirm no active or queued runs.
-2. **Recover the CTO first** (see the CTO section): its `pausing` state is
-   unrelated to the image and should be resolved before the cutover, so the
-   upgrade does not start with an unproven native session.
+2. **CTO recovery** (see the CTO section) is independent of the image: either
+   before the cutover with the guarded SQL, or after deployment with the new
+   `attest-stopped` endpoint (no SQL). Do not pause or terminate the CEO until its
+   lease `9d0a42ce` on the retired host is settled.
 3. **Preflight** queries above; **backup** as described.
-4. **CI**: wait for this PR's checks. Review the report; merge only after approval.
-   Merging pushes `deploy/stefan-production`, which runs the
-   `Stefan production image` workflow: it builds Core + Linux runner and the
-   Darwin arm64 runner from the same commit and publishes
-   `ghcr.io/ugoi/paperclip:stefan-<sha>`. It does not deploy.
-   Alternatively build locally with the Homelab recipe in
-   `apps/paperclip/` (`Dockerfile.core-build`, `Dockerfile.core-artifact`,
-   `Dockerfile.runtime-access`) as for `da248c1`.
+4. **CI / build.** GitHub Actions in `ugoi/paperclip` has not started a single
+   run since 2026-10-22 11:23 UTC (no runs for PRs #7–#11, for pushes to
+   `deploy/stefan-production`, or for this PR, although Actions is enabled and
+   GitHub reports no incident). First check *Settings → Actions* and the account's
+   Actions status. If it works again, this PR runs `Stefan fork PR` (new, see
+   `2a8cb3364`), and merging runs `Stefan production image` (Core + Linux runner +
+   Darwin arm64 runner, published to GHCR, no deploy). Otherwise build locally
+   with the Homelab recipe in `apps/paperclip/` (`Dockerfile.core-build`,
+   `Dockerfile.core-artifact`, `Dockerfile.runtime-access`) exactly as for
+   `da248c1`, and build the Darwin runner on the Mac; in that case the Rust
+   tests must be run as part of that build. Merge only after approval.
 5. **Verify artifacts**: image source stamp = merge commit, Linux and Darwin
    `paperclip-runnerd` hashes in both package/vendor locations, UI build
    revision, default entrypoint cold start against a disposable PostgreSQL 18
@@ -289,35 +438,59 @@ configuration were not changed.
 8. **Acceptance**: `/api/health` commit, fresh browser login + WebSocket, three
    attachment downloads with matching SHA-256, unchanged agent/environment
    configuration, one bounded `claude_local` run per SSH environment (Linux
-   `agents`), cancellation of a running task with confirmed process exit, the
-   nested status filter, and an observer-agent 403 probe. Then disable drain.
+   `agents`), the nested status filter, an observer-agent 403 probe, and
+   `GET /api/agents/<id>/lifecycle/stop-blockers` for each agent (expect only the
+   known historical blockers). Test Stop/cancel only on a disposable agent: a
+   cancelled running `claude_local` SSH run cannot produce a stop receipt, so that
+   agent's next pause will need an attestation. Then disable drain.
 
 ## Tests and checks
 
-VM202 ran the checks while the overnight experiments were executing (load average
-60–77 on 12 cores); all local checks ran with `nice 19`. Many upstream tests with
-5–15 s timeouts timed out for that reason; each timeout below was checked for a
-real assertion failure. Rust is not installed on VM202, so the Rust build, Rust
-tests and every TypeScript test that needs `runner/target/debug/paperclip-runnerd`
-are covered only by the GitHub CI of this PR.
+**No GitHub CI ran.** GitHub Actions in `ugoi/paperclip` has not started any run
+since 2026-10-22 11:23 UTC (none for PRs #7–#11, pushes to the deploy branch, or
+this PR), although Actions is enabled, all workflows are `active` and GitHub
+reports no incident. In addition, upstream's `pr.yml` now only calls
+`paperclipai/paperclip`'s trusted workflow on the upstream AWS runner group, so it
+could not run in the fork anyway. This PR therefore adds `Stefan fork PR`
+(`2a8cb3364`), which runs the same lanes on GitHub-hosted runners once Actions
+starts runs again. All results below are local.
 
-| Check | Result |
-| --- | --- |
-| Runner `typecheck:typescript` (incl. `check:acpx-profiles`, protocol/schema checks, both tsconfigs) | **pass** |
-| Server `tsc --noEmit` | SERVER_TSC |
-| UI typecheck | UI_TC |
-| Hermes adapter typecheck / Kubernetes plugin typecheck | **pass** / **pass** |
-| `adapter-utils` `tsc --noEmit` | **pass** |
-| Hermes `execute.resume-args.test.ts` | **1/1 pass** |
-| Kubernetes plugin unit tests (standalone install) | **214/216**; the 2 failures are upstream `file-sync.test.ts` 5 s timeouts (one streams >100 MB); all fork-touched files pass |
-| adapter-utils `ssh-tar-diagnostics` + `remote-managed-runtime` | **12/12**, three consecutive runs, no unhandled errors |
-| UI `IssuesList.test.tsx` + `issue-hierarchy-context.test.ts` | UI_TESTS |
-| Runner: native-execution, codex security/context, launch readiness, provider launch, native-session-runtime | RUNNER_TESTS |
-| Server: observer boundary, provider config, Hermes session id, native input, preconfigured home, launch prerequisite, process cleanup/probe, recovery diagnostics, setup readiness | SERVER_SMALL |
-| Server DB suites (embedded PostgreSQL): SSH termination receipt, task workspace binding, routines, issue mutation ownership, heartbeat workspace session | SERVER_DB |
-| Server `native-session-executor.test.ts` | SERVER_EXEC |
-| Runner `runnerd-codex-transport.test.ts` | RUNNER_TRANSPORT |
-| GitHub CI on this PR | see PR checks (CI_STATUS) |
+Where: VM202 (`agents`, Linux) ran while the overnight experiments were executing
+(load average 60–126 on 12 cores), all with `nice`, so many timing-sensitive
+upstream tests timed out there. The same suites were therefore repeated on the
+MacBook (macOS arm64, 8 cores, Node 24.21.0, pnpm 9.15.4, Rust 1.97.1 in an
+isolated toolchain) from a clean clone of this branch. Every remaining failure was
+checked for its cause.
+
+| Check | Where | Result |
+| --- | --- | --- |
+| Runner `typecheck:typescript` (incl. `check:acpx-profiles`, protocol/schema checks, both tsconfigs) | Linux | **pass** |
+| Server `typecheck` (full script: Runner vendor release build, plugin SDK, `tsc --noEmit`) | macOS | **pass** at `9a07785c4` (first run found a missing import → fixed in `757382cf0`) |
+| UI `typecheck` | macOS | **pass** (Linux run raced the plugin-SDK build: only `@paperclipai/plugin-sdk/ui` unresolved) |
+| Root `pnpm run typecheck` (all workspace packages) | macOS | **pass** (all workspace packages, at `9a07785c4`) |
+| Hermes adapter / Kubernetes plugin / `adapter-utils` typecheck | Linux | **pass** / **pass** / **pass** |
+| Rust: `cargo test --release --locked --workspace` (= `test:rust`) | macOS | **810 passed, 0 failed**, 3 ignored, 38 suites |
+| UI `IssuesList.test.tsx` + `issue-hierarchy-context.test.ts` | macOS | **67/67** (`8447e1e44` fixed the re-applied test for upstream's batched `parentIds` reads) |
+| Server DB suites, embedded PostgreSQL: SSH termination receipt, task workspace binding, routines, issue mutation ownership, heartbeat workspace session, operator stop attestation, agent lifecycle (66), driver scope | macOS | **674/674** |
+| Server native runtime: observer boundary, provider config, Hermes session id, native input, preconfigured home, launch prerequisite, process cleanup/probe, recovery diagnostics, setup readiness | macOS | **235/237**; the 2 failures are macOS test-environment only (`/var` → `/private/var` realpath, macOS `kill` ESRCH) and passed on Linux |
+| Server `native-session-executor.test.ts` | macOS + Linux | macOS **1025/1027** after `120268c9a`, `757382cf0`, `9a07785c4`, `3a3b41ba3`, `d589ff555`; the 2 macOS failures mock Linux `/proc`/`uname` and pass on Linux. Linux, all 55 remote-runner launcher/supervision cases plus the exit-receipt and HTTP-Stop-during-staging cases: **pass**. The upstream gateway health-outage case allows 5 s from launch to the first healthy probe; with the fork's two real prerequisite probes it missed that window twice under load, and passes (4.97 s) once the mock answers the probes (`d589ff555`) |
+| Runner: native-execution, codex security/context, provider launch, native-session-runtime | macOS | **pass** (367/369 in the first run; the 2 remaining launch-readiness cases needed the debug `paperclip-runnerd` and pass in the next row) |
+| Runner `runnerd-codex-transport.test.ts` + `runner-launch-readiness.test.ts` with a freshly built debug `paperclip-runnerd` | macOS | **330/330** |
+| Same Runner transport/readiness files + `codex-security-config.test.ts`, Linux debug `paperclip-runnerd` built with Rust 1.97.1 | Linux | **339/348 not confirmed**: first run 329/348 at load 80–120; a serial rerun of the 19 failures passed 10. The remaining 9 (cold-restore of a suspended session, real OpenCode proxy boundary ×3, event-backlog suspension, setup hello with late remote release, one launch-readiness case, Codex command resolution with `spawnSync … ETIMEDOUT`) fail with timeouts or a quiescence race. The same files pass 330/330 on macOS and the touched transport logic is platform-independent, so this is most likely host load — but it is **not verified on an idle Linux host**; run these before merging. |
+| `adapter-utils` `ssh-tar-diagnostics` + `remote-managed-runtime` | Linux | **12/12**, three consecutive runs, no unhandled errors (macOS: 11/12, temp-dir realpath in the expected message) |
+| Hermes `execute.resume-args.test.ts` | Linux | **1/1** |
+| Kubernetes plugin unit tests (standalone install) | Linux | **214/216**; the 2 failures are upstream `file-sync.test.ts` 5 s timeouts (one streams > 100 MB); all fork-touched files pass |
+
+Real defects found by these checks and fixed on the branch: a missing import in
+the re-applied remote launcher signal path (`757382cf0`, would have thrown
+`ReferenceError` when signalling a fingerprinted remote runner), a duplicate import
+that broke the executor test file (`120268c9a`), stale test mocks after upstream
+changes (`8447e1e44`, `9a07785c4`, `3a3b41ba3`, `d589ff555`), and an unhandled `EPIPE` in the new upload
+early stop (fixed inside `b3de43884`).
+
+Not run: the complete upstream monorepo suite (12 server shards, chat, workspace
+groups, E2E, Storybook), the Docker image build, and the live Linux/Mac
+native-runner acceptance (needs the deployed artifacts).
 
 ## Risks
 
@@ -327,16 +500,21 @@ are covered only by the GitHub CI of this PR.
    The highest-risk resolutions are in `native-session-executor.ts`
    (launcher cancellation/readiness), `runnerd-codex-transport.ts` (admission
    deadlines) and `remote-runner-recovery-diagnostics.ts` (Darwin dispatch in front
-   of upstream's Linux check). The Mac native worker path has no local test on real
-   Darwin in this preparation; the Darwin probe script itself is unchanged.
+   of upstream's Linux check). Rust tests and the server process-probe/executor
+   suites ran on macOS, but no live Mac worker run was possible before deployment.
 2. **Migrations are one-way.** 46 migrations, including three data backfills and a
    new unique constraint on `issue_comments` that fails on duplicates. Rollback
    after boot requires the database restore; an image-only downgrade is not safe.
-3. **Rust and native artifacts unverified locally.** No cargo on VM202; Rust build,
-   Rust tests and binary-dependent TypeScript tests depend on this PR's CI and on
-   the image workflow. Native artifact hashes must be recorded after the build.
-4. **Local test signal is weak** because of machine load (timeouts). Treat the PR's
-   GitHub CI as the authoritative regression signal.
+3. **No CI signal.** GitHub Actions does not start runs in the fork (since
+   2026-10-22). Rust tests passed on macOS arm64 only (Linux Rust tests not run);
+   9 Linux Runner transport cases remain unconfirmed under VM202 load (they pass
+   on macOS); the full upstream suite has not run. The native Linux and Darwin
+   artifacts still have to be built and hash-verified.
+4. **Local test signal is partial.** Focused suites for every fork-touched area
+   passed (see the table); unrelated upstream suites were not run, and VM202 timed
+   out many upstream tests under load. Treat the Docker/default-entrypoint cold
+   start against a disposable PostgreSQL (all 46 migrations) and the live
+   acceptance as mandatory gates.
 5. **Hermes PRs are unmerged upstream.** If upstream merges different versions, the
    next update must drop `8a08cf80b`, `7c2ff4fd6`, `fc9b60b59`.
 6. **`claude_local` project tasks on SSH stay broken until the in-place follow-up**;
@@ -347,3 +525,8 @@ are covered only by the GitHub CI of this PR.
    `build.json` become obsolete.
 8. **Workflow trigger on merge.** Merging publishes an image candidate to GHCR
    immediately (no deploy). Make sure that is wanted when merging.
+9. **Stop proof for `claude_local` over SSH.** Until a receipt producer exists for
+   legacy SSH runs, every cancelled running `claude_local` SSH run makes that
+   agent's next pause/terminate wait for an operator attestation (new endpoint) or
+   SQL. The CEO already has an unsettled lease (`9d0a42ce`) on the retired host:
+   do not pause or terminate the CEO before that lease is repaired.
