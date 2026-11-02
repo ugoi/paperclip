@@ -12,7 +12,9 @@ import { agentHarnessType, isEnvironmentDriverSupportedForAdapter, normalizeClau
 import { resolveNewAgentRunnerForCompany } from "../services/agent-runner-selection.js";
 import { agentEnvironmentTestService } from "../services/agent-environment-test.js";
 import { qualifyAgentRunner } from "../services/agent-runner-qualification.js";
-import { createAgentLifecycle } from "../services/agent-lifecycle.js";
+import { createAgentLifecycle, scheduleAgentLifecycle } from "../services/agent-lifecycle.js";
+import { inspectAgentExecutionStop } from "../services/agent-execution-stop.js";
+import { attestAgentExecutionsStopped } from "../services/operator-stop-attestation.js";
 import { isAgentSetupDraft } from "../modules/agent-lifecycle/index.js";
 
 import { agentIdentityService } from "../services/agent-identity.js";
@@ -5771,6 +5773,49 @@ export function agentRoutes(
       agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
       action: "agent.lifecycle_retried", entityType: "agent", entityId: agent.id });
     res.json(redactAgentRowForResponse(agent));
+  });
+
+  // Lists the executions that keep a pause or termination pending, so an
+  // operator can see why an agent stays in pausing. Read-only.
+  router.get("/agents/:id/lifecycle/stop-blockers", async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const existing = await getAccessibleAgent(req, res, id);
+    if (!existing) return;
+    await assertCanConfigureAgentSetup(req, existing);
+    const inspection = await inspectAgentExecutionStop(db, [id], { limit: 100 });
+    res.json({ agentId: id, lifecycleState: existing.lifecycleState, ...inspection });
+  });
+
+  // Instance operators may attest that exact cancelled runs have stopped when
+  // the host cannot produce stop proof any more. The statement is audited and
+  // never replaces lease cleanup or a live process observed by this server.
+  router.post("/agents/:id/lifecycle/attest-stopped", async (req, res) => {
+    assertBoard(req);
+    assertInstanceAdmin(req);
+    const id = req.params.id as string;
+    const existing = await getAccessibleAgent(req, res, id);
+    if (!existing) return;
+    await assertCanConfigureAgentSetup(req, existing);
+    const runIds: unknown = req.body?.runIds;
+    const note = typeof req.body?.note === "string" ? req.body.note.trim() : "";
+    if (!Array.isArray(runIds) || runIds.length === 0 || runIds.length > 100 ||
+        !runIds.every(value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))) {
+      throw badRequest("runIds must list 1 to 100 run ids");
+    }
+    if (req.body?.confirm !== "processes_stopped") {
+      throw badRequest("Verify on the execution host that these runs have no live process, then set confirm to \"processes_stopped\"");
+    }
+    if (note.length < 10 || note.length > 2000) throw badRequest("note must describe the stop evidence in 10 to 2000 characters");
+    const userId = req.actor.userId ?? "board";
+    const result = await attestAgentExecutionsStopped(db, { agentId: id, runIds: runIds as string[], attestedByUserId: userId, note });
+    if (!result) { res.status(404).json({ error: "Agent not found" }); return; }
+    await logActivity(db, { companyId: result.companyId, actorType: "user", actorId: userId,
+      action: "agent.execution_stop_attested", entityType: "agent", entityId: id,
+      details: { runIds: result.attested.map(row => row.runId), leaseIds: result.attested.flatMap(row => row.leaseIds), note } });
+    scheduleAgentLifecycle(db, id);
+    const inspection = await inspectAgentExecutionStop(db, [id], { limit: 100 });
+    res.json({ ...result, ...inspection });
   });
 
   router.post("/agents/:id/pause", async (req, res) => {

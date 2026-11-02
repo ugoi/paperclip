@@ -55,7 +55,7 @@ import {
   formatIssueIdentifierLink,
 } from "./heartbeat/scheduling.js";
 import { canApplyTaskWorkspaceSelectionAtAdmission, taskWorkspaceRuntimeSelectionEnabled } from "./execution-workspace-policy.js";
-import { agentExecutionsHaveStopped } from "./agent-execution-stop.js";
+import { agentExecutionsHaveStopped, LEGACY_STARTUP_SETTLED_KEY } from "./agent-execution-stop.js";
 import {
   cancelHeartbeatNativeRun,
   terminateHeartbeatRunProcess,
@@ -347,6 +347,7 @@ import {
   agentWakeupRequests,
   chatActions,
   heartbeatRuns,
+  heartbeatRunEvents,
   environmentLeases,
   issueComments,
   issues,
@@ -3893,6 +3894,22 @@ export function heartbeatService(
             resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
               ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
+        }
+        if (latestRun?.status === "cancelled" && latestRun.runtimeMode === "legacy" && !legacyAdapterEntered &&
+            !nativeDispatchStarted && !nativeOwnershipHeld && !latestRun.processPid && !latestRun.processGroupId &&
+            !latestRun.processStartedAt) {
+          // Stop arrived before this executor entered the legacy adapter, and
+          // preparation and lease cleanup have settled. No provider process can
+          // exist, so record the durable receipt that pause and termination
+          // accept. An absent PID alone never proves this.
+          await db.update(heartbeatRuns).set({
+            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+              ${JSON.stringify({ [LEGACY_STARTUP_SETTLED_KEY]: new Date().toISOString() })}::jsonb`,
+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled"),
+            eq(heartbeatRuns.runtimeMode, "legacy"), isNull(heartbeatRuns.processPid),
+            isNull(heartbeatRuns.processGroupId), isNull(heartbeatRuns.processStartedAt),
+            sql`not exists (select 1 from ${heartbeatRunEvents} where ${heartbeatRunEvents.runId} = ${run.id}
+              and ${heartbeatRunEvents.eventType} = 'adapter.invoke')`));
         }
         if (latestRun?.runtimeMode === "native" && isHeartbeatRunTerminalStatus(latestRun.status) &&
             !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled && !nativeOwnershipHeld) {
