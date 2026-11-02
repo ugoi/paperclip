@@ -39,7 +39,6 @@ import { dirname, join } from "node:path";
 import {
   environmentLeases,
   heartbeatRuns,
-  environmentLeases,
   heartbeatRunEvents,
   issueThreadInteractions,
   issues,
