@@ -158,6 +158,37 @@ export interface DestroyLeaseInput {
   secretName: string | null;
 }
 
+/** A delete acknowledgement is not process-stop proof. Observe this exact
+ * allocation until its controller, owned pods and credential Secret are gone.
+ * This bounded wait exists only during an explicit cleanup operation. */
+export async function waitForLeaseDeletion(
+  clients: KubeClients,
+  input: DestroyLeaseInput,
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<void> {
+  const deadline = Date.now() + (options.timeoutMs ?? 45_000);
+  const absent = async (read: Promise<unknown>) => {
+    try { await read; return false; }
+    catch (err) { if (isKubeNotFoundError(err)) return true; throw err; }
+  };
+  for (;;) {
+    const workloadGone = await absent(input.backend === "sandbox-cr"
+      ? clients.custom.getNamespacedCustomObject({ group: "agents.x-k8s.io", version: "v1alpha1",
+          plural: "sandboxes", namespace: input.namespace, name: input.name })
+      : clients.batch.readNamespacedJob({ namespace: input.namespace, name: input.name }));
+    const pods = await clients.core.listNamespacedPod({ namespace: input.namespace });
+    const ownedPods = pods.items.filter(pod => pod.metadata?.name === input.podName ||
+      pod.metadata?.ownerReferences?.some(owner => owner.name === input.name &&
+        owner.kind === (input.backend === "sandbox-cr" ? "Sandbox" : "Job")));
+    const secretGone = !input.secretName || await absent(clients.core.readNamespacedSecret({
+      namespace: input.namespace, name: input.secretName,
+    }));
+    if (workloadGone && ownedPods.length === 0 && secretGone) return;
+    if (Date.now() >= deadline) throw new Error(`Termination of ${input.namespace}/${input.name} is not confirmed; resources still exist.`);
+    await new Promise(resolve => setTimeout(resolve, options.pollMs ?? 500));
+  }
+}
+
 /**
  * Forcibly delete every resource acquireLease created for this lease.
  * Workload first (its deletion cascades to the pod and, via ownerReferences,

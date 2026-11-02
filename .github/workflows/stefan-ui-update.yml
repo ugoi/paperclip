@@ -1,0 +1,57 @@
+name: Stefan UI update
+on:
+  push:
+    branches: [fix/nested-filter-release-20261023]
+  workflow_dispatch:
+  workflow_call:
+permissions: {}
+concurrency:
+  group: stefan-ui-update-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  image:
+    if: github.repository == 'ugoi/paperclip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require unchanged backend, workers and dependencies
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          base = 'ccce203d55fe35a728ee139b2e513f66cc176323'
+          subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
+          packaging = {'Dockerfile.ui-update', 'Dockerfile.ui-update.dockerignore', '.github/workflows/stefan-ui-update.yml', '.github/workflows/stefan-production.yml', 'doc/deployment-fork.md', 'doc/PRODUCT.md'}
+          unexpected = [p for p in changed if not p.startswith('ui/src/') and p not in packaging]
+          if unexpected:
+              raise SystemExit('UI-only build cannot publish changes to: ' + ', '.join(unexpected))
+          print('Verified UI-only application changes against', base)
+          PY
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Test, build and publish the UI update
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.ui-update
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/ugoi/paperclip:ui-${{ github.sha }}
+          build-args: |
+            PAPERCLIP_UI_BUILD_COMMIT=${{ github.sha }}
+      - name: Record image identity
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          printf 'UI source: `%s`\n\nCore/worker source: `ccce203d55fe35a728ee139b2e513f66cc176323`\n\nImage: `ghcr.io/ugoi/paperclip@%s`\n\nTests, UI typecheck and UI build passed before publication. Deployment is separate.\n' "$GITHUB_SHA" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

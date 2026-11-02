@@ -197,3 +197,24 @@ not receive Codex's skill configuration or structured skill inputs.
 These are delivery guarantees, not guarantees of model adherence. The onboarding
 `first-task` skill uses this generic mechanism; its prompt and persona are not
 changed by the wiring.
+
+## Explicit trusted SSH hosts
+
+This deployment fork supports an operator-selected native Codex worker on a
+trusted SSH host with `homeMode: "preconfigured"`,
+`codexSandboxMode: "danger-full-access"`, and an optional absolute
+`remoteCodexHome` selecting that remote user's existing scoped Codex home.
+The controller requires SSH, verifies the selected remote home, and binds these
+settings to the persisted native execution. They are not task prompt directives
+or ambient environment switches. An unchanged agent retains the existing
+workspace permission policy.
+
+The Runner records a distinct `trustedHostFullAccess` launch grant; it does not
+represent the host as an external sandbox. Default execution uses Codex's
+`dangerFullAccess` policy for both new threads and turns. Planning remains under
+the read-only profile. Reattachment rejects a changed host-access grant or home
+binding, and older persisted launches default to restricted access.
+
+A scoped preconfigured Codex home can retain the host's explicitly configured
+MCP integrations, including Computer Use, and its existing same-user login.
+Keep credentials out of Git and preserve the user's personal configuration.

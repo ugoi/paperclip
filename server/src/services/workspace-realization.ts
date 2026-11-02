@@ -1,3 +1,4 @@
+import path from "node:path";
 import { workspaceProviderBindingSchema } from "@paperclipai/shared";
 import type {
   Environment,
@@ -37,6 +38,19 @@ function readPathAliases(value: unknown): Array<{ path: string; target: string }
     const target = readString(parsed.target);
     return aliasPath && target ? [{ path: aliasPath, target }] : [];
   });
+}
+
+// Map a Core-side workspace path onto the SSH host path it mirrors, if an alias covers it.
+export function resolveInPlaceAliasRoot(localPath: string | null | undefined, aliases: unknown): string | null {
+  if (typeof localPath !== "string" || !localPath.startsWith("/")) return null;
+  const normalized = path.posix.normalize(localPath).replace(/(.)\/+$/, "$1");
+  for (const alias of readPathAliases(aliases)) {
+    const prefix = path.posix.normalize(alias.path).replace(/\/+$/, "");
+    if (normalized === prefix || normalized.startsWith(prefix + "/")) {
+      return path.posix.join(alias.target, normalized.slice(prefix.length));
+    }
+  }
+  return null;
 }
 
 // Read the additional referenced (mentioned) project sources. Legacy payloads omit the field, so
@@ -191,11 +205,15 @@ export function buildWorkspaceRealizationRecord(input: {
     ...parseObject(providerMetadata.workspaceRealization),
     ...providerMetadata,
   };
-  const mode = realizationMetadata.mode === "in_place" || realizationMetadata.realizationMode === "in_place"
+  const inPlaceAliasRoot = transport === "ssh"
+    ? resolveInPlaceAliasRoot(input.request.source.localPath, realizationMetadata.inPlaceWorkspaceAliases)
+    : null;
+  const mode = realizationMetadata.mode === "in_place" || realizationMetadata.realizationMode === "in_place" || inPlaceAliasRoot
     ? "in_place" as const
     : "copy" as const;
   const authoritativeRoot =
     readString(realizationMetadata.authoritativeRoot) ??
+    inPlaceAliasRoot ??
     (mode === "in_place" ? remotePath : null) ??
     input.request.source.localPath;
   const pathAliases = readPathAliases(realizationMetadata.pathAliases ?? realizationMetadata.workspaceAliases);

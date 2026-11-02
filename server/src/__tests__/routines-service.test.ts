@@ -1,3 +1,4 @@
+import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { subscribeDatabaseWork } from "@paperclipai/db";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
 import { createHmac, randomUUID } from "node:crypto";
@@ -38,7 +39,8 @@ import * as providerRegistry from "../secrets/provider-registry.ts";
 import { routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
 
-const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const externalUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_ROUTINES_TEST_DATABASE_URL");
+const embeddedPostgresSupport = externalUrl ? { supported: true, reason: undefined } : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const originalSecretsProviderEnv = process.env.PAPERCLIP_SECRETS_PROVIDER;
 const originalPaperclipApiUrlEnv = process.env.PAPERCLIP_API_URL;
@@ -55,8 +57,8 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
   beforeAll(async () => {
     process.env.PAPERCLIP_API_URL = "http://localhost:3100";
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-service-");
-    db = createDb(tempDb.connectionString);
+    if (!externalUrl) tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-service-");
+    db = createDb(externalUrl ?? tempDb!.connectionString);
   }, 20_000);
 
   afterEach(async () => {
@@ -1484,6 +1486,32 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(routineIssues[0]?.id).toBe(previousIssue.id);
   });
 
+  it.each(["succeeded", "failed", "cancelled", "timed_out"])(
+    "dispatches after a %s run left a stale indexed execution owner", async status => {
+      const f = await seedFixture();
+      const first = await f.svc.runRoutine(f.routine.id, { source: "manual" });
+      const [prior] = await db.select().from(issues).where(eq(issues.id, first.linkedIssueId!));
+      await db.update(heartbeatRuns).set({ status, finishedAt: new Date() }).where(eq(heartbeatRuns.id, prior.executionRunId!));
+      const next = await f.svc.runRoutine(f.routine.id, { source: "manual" });
+      expect(next.status).toBe("issue_created");
+      expect(next.linkedIssueId).not.toBe(first.linkedIssueId);
+      expect((await db.select().from(issues).where(eq(issues.id, prior.id)))[0].executionRunId).toBeNull();
+      expect(f.wakeups).toHaveLength(2);
+    });
+
+  it("preserves and coalesces into a terminal queue-first explicit continuation claim", async () => {
+    const f = await seedFixture();
+    const first = await f.svc.runRoutine(f.routine.id, { source: "manual" });
+    const [prior] = await db.select().from(issues).where(eq(issues.id, first.linkedIssueId!));
+    await db.update(heartbeatRuns).set({ status: "failed", runtimeMode: "legacy", finishedAt: new Date(),
+      contextSnapshot: { issueId: prior.id, explicitUserContinuation: true },
+    }).where(eq(heartbeatRuns.id, prior.executionRunId!));
+    const next = await f.svc.runRoutine(f.routine.id, { source: "manual" });
+    expect(next).toMatchObject({ status: "coalesced", linkedIssueId: prior.id });
+    expect((await db.select().from(issues).where(eq(issues.id, prior.id)))[0].executionRunId).toBe(prior.executionRunId);
+    expect(f.wakeups).toHaveLength(1);
+  });
+
   it("preserves the archive and Mine membership when a manual run coalesces", async () => {
     const { agentId, companyId, issueSvc, routine, svc } = await seedFixture();
     const userId = randomUUID();
@@ -2167,7 +2195,10 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       },
     });
 
-    const run = await svc.runRoutine(routine.id, { source: "manual" });
+    const events: string[] = [];
+    const unsubscribe = subscribeDatabaseWork(db, DELIVERY_QUEUES.decisionTargets, event => { events.push(event); });
+    const run = await svc.runRoutine(routine.id, { source: "manual" }).finally(unsubscribe);
+    expect(events).toEqual([]);
 
     expect(run.status).toBe("failed");
     expect(run.failureReason).toContain("queue unavailable");

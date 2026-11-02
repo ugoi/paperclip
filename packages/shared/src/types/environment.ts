@@ -20,6 +20,8 @@ export interface SshEnvironmentConfig {
   privateKeySecretRef: EnvSecretRefBinding | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
+  /** Core-path prefixes mirrored on the SSH host; matching project workspaces run in place. */
+  inPlaceWorkspaceAliases?: Array<{ path: string; target: string }>;
 }
 
 export type SandboxEnvironmentProvider = "fake" | (string & {});
@@ -66,6 +68,8 @@ export type SandboxEnvironmentConfig =
   | PluginSandboxEnvironmentConfig;
 
 export interface PluginEnvironmentConfig {
+  runnerLifecycleMode?: "inherit" | "per_turn" | "warm";
+  runnerIdleTimeoutMs?: number;
   pluginKey: string;
   driverKey: string;
   driverConfig: Record<string, unknown>;

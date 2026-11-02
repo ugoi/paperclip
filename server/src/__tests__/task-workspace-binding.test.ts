@@ -13,7 +13,7 @@ import request from "supertest";
 import { taskWorkspaceRoutes } from "../routes/task-workspaces.js";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/error-handler.js";
-import { agents, authUsers, companies, companyMemberships, completionContracts, createDb, environmentLeases, executionWorkspaceRepositories, executionWorkspaceRepositoryAccess, executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations, nativeRunResults, workspaceOperations, principalPermissionGrants, projectAccessMembers, projects, projectWorkspaces } from "@paperclipai/db";
+import { agents, authUsers, companies, companyMemberships, completionContracts, createDb, environmentLeases, executionWorkspaceRepositories, executionWorkspaceRepositoryAccess, executionWorkspaces, heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations, nativeRunResults, workspaceOperations, principalPermissionGrants, projectAccessMembers, projects, projectWorkspaces } from "@paperclipai/db";
 import { executionWorkspaceService } from "../services/execution-workspaces.js";
 import { authorizationService, canActorReadExecutionWorkspace } from "../services/authorization.js";
 import { assertChatExecutionDefaultsAccess } from "../services/chat-execution-defaults.js";
@@ -417,6 +417,68 @@ const support = await getEmbeddedPostgresTestSupport();
         expect(await f.svc.inspectTaskWorkspace(f.companyId, f.issueId, f.actor)).toMatchObject({ workspace: null, bindingRevision: entryPoint === "pending selection" ? 3 : 2 });
       }
     });
+
+    it("allows a workspace change after a settled bootstrap failure with no provider work", async () => {
+      const f = await settledNativeTask("native_continuation_requires_reconciliation");
+      await db.update(heartbeatRuns).set({ status: "failed", nativePhase: "observed",
+        resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+        runnerProfileJson: { sessionCheckpoint: { providerSessionId: "inherited-session" } },
+      }).where(eq(heartbeatRuns.id, f.run.id));
+      await db.insert(workspaceOperations).values({ companyId: f.companyId, issueId: f.issueId,
+        heartbeatRunId: f.run.id, executionWorkspaceId: f.workspaceId, phase: "workspace_finalize", status: "failed",
+        metadata: { errorMessage: "runner_state_identity_mismatch: prior_owner_terminal_state_indeterminate" } });
+      await f.change();
+      expect(await f.svc.inspectTaskWorkspace(f.companyId, f.issueId, f.actor)).toMatchObject({
+        workspace: null, pendingSelection: null,
+      });
+      expect((await db.select().from(workspaceOperations).where(eq(workspaceOperations.heartbeatRunId, f.run.id)))[0])
+        .toMatchObject({ status: "failed" });
+    });
+
+    it.each(["unknown startup", "provider started", "provider event", "process identity", "sync descriptor",
+      "copyback owner", "restore failure", "pending cleanup", "accepted result", "unfinished operation"] as const)(
+      "keeps a bootstrap failure with %s fenced", async (obligation) => {
+        const f = await settledNativeTask("native_continuation_requires_reconciliation", obligation === "accepted result");
+        const recovery = { kind: "bootstrap", ...(obligation === "unknown startup" ? {} : { providerWorkStarted: obligation === "provider started" }) };
+        await db.update(heartbeatRuns).set({ status: "failed", resultJson: { executionRecovery: recovery,
+          ...(obligation === "restore failure" ? { workspaceRestoreFailure: "restore_failed" } : {}) },
+          ...(obligation === "process identity" ? { processPid: 123 } : {}),
+          runnerProfileJson: obligation === "sync descriptor" ? { nativeWorkspaceSync: { state: "prepared" } }
+            : obligation === "copyback owner" ? { nativeWorkspaceFinalizationOwner: { token: "owner" } } : {},
+        }).where(eq(heartbeatRuns.id, f.run.id));
+        if (obligation === "provider event") await db.insert(heartbeatRunEvents).values({ companyId: f.companyId,
+          agentId: f.run.agentId, runId: f.run.id, seq: 1, eventType: "turn.started", stream: "system", payload: {} });
+        if (obligation === "pending cleanup") await db.update(environmentLeases).set({ status: "pending_cleanup" })
+          .where(eq(environmentLeases.id, f.lease.id));
+        await db.insert(workspaceOperations).values({ companyId: f.companyId, issueId: f.issueId,
+          heartbeatRunId: f.run.id, executionWorkspaceId: f.workspaceId, phase: "workspace_finalize",
+          status: obligation === "unfinished operation" ? "running" : "failed" });
+        await expect(f.change()).rejects.toThrow(/workspace|Previous task run/);
+      });
+
+    it.each(["settled", "wrong receipt", "copyback", "unknown restore paths", "sync reference", "finalizer owner", "accepted output"] as const)(
+      "handles a shared remote provider failure with %s evidence", async evidence => {
+        const f = await settledNativeTask("native_provider_terminal_failed", evidence === "accepted output");
+        await db.insert(workspaceOperations).values({ companyId: f.companyId, issueId: f.issueId,
+          heartbeatRunId: f.run.id, executionWorkspaceId: f.workspaceId, phase: "workspace_finalize", status: "failed",
+          metadata: { errorMessage: "provider_turn_lost_on_restore" } });
+        await db.update(environmentLeases).set({ provider: "ssh", providerLeaseId: "ssh://test/shared",
+          metadata: { executionWorkspaceMode: "shared_workspace",
+            workspaceRealization: { rebuild: { mode: "shared_workspace" },
+              ...(evidence === "unknown restore paths" ? {} : { outboundRestorePaths: evidence === "copyback" ? ["pending"] : [] }) },
+            remoteExecutionTermination: { schema: "paperclip.remote-termination.v1", companyId: f.companyId,
+              runId: evidence === "wrong receipt" ? randomUUID() : f.run.id, leaseId: f.lease.id,
+              provider: "ssh", providerLeaseId: "ssh://test/shared", state: "stopped" },
+          } }).where(eq(environmentLeases.id, f.lease.id));
+        if (evidence === "sync reference" || evidence === "finalizer owner") await db.update(heartbeatRuns).set({
+          runnerProfileJson: { [evidence === "sync reference" ? "nativeWorkspaceSync" : "nativeWorkspaceFinalizationOwner"]: {} },
+        }).where(eq(heartbeatRuns.id, f.run.id));
+        if (evidence === "settled") {
+          await f.change();
+          expect((await f.svc.inspectTaskWorkspace(f.companyId, f.issueId, f.actor)).workspace).toBeNull();
+          expect((await db.select().from(workspaceOperations).where(eq(workspaceOperations.heartbeatRunId, f.run.id)))[0].status).toBe("failed");
+        } else await expect(f.change()).rejects.toThrow(/workspace|Previous task run/);
+      });
 
     it.each(["warm release", "unsafe export omission"] as const)("accepts a settled %s receipt", async (receipt) => {
       const f = await settledNativeTask("native_retry_cancelled", receipt === "unsafe export omission");
