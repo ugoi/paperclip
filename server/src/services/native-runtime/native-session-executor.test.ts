@@ -1052,6 +1052,9 @@ fs.readFileSync = function(path, ...args) {
     let savedMarker = "";
     const ok = { stdout: "", stderr: "", exitCode: 0, signal: null, timedOut: false };
     const execute = vi.fn(async (request: { command: string; args?: string[] }) => {
+      // The fork's prerequisite probes the probing shell itself; this fixture
+      // replaces /proc for the supervised child only.
+      if (request.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) return ok;
       if (request.args?.[2] === "paperclip-runner-launch") {
         savedMarker = `${request.args[4]}\n${child.pid}\n2026-10-26T00:00:00.000Z\nrunner-exit\nlinux:abcd-1234:100\n`;
         await writeFile(marker, savedMarker);
