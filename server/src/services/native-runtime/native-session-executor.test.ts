@@ -942,7 +942,10 @@ describe("remote runner process supervision", () => {
     const entered = new Promise<void>(resolve => { enter = resolve; });
     const gate = new Promise<void>(resolve => { release = resolve; });
     const pause = async () => { enter(); await gate; };
-    const execute = vi.fn();
+    // The fork's process-probe prerequisite runs before the dispatch trace.
+    const execute = vi.fn(async (input: { args?: string[] }) => input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT
+      ? { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" } : undefined);
+    const launchRpcs = () => execute.mock.calls.filter(([input]) => input.args?.[1] !== REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT);
     const handle = createRemoteRunnerProcessLauncher({
       target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: "/workspace" },
       runner: { execute } as never,
@@ -954,11 +957,11 @@ describe("remote runner process supervision", () => {
       await entered;
       expect(handle.child.kill("SIGTERM")).toBe(true);
       expect(handle.isExitConfirmed?.()).toBe(false);
-      expect(execute).not.toHaveBeenCalled();
+      expect(launchRpcs()).toHaveLength(0);
       release();
       await expect(handle.completion).resolves.toMatchObject({ code: null, signal: "SIGTERM" });
       expect(handle.isExitConfirmed?.()).toBe(true);
-      expect(execute).not.toHaveBeenCalled();
+      expect(launchRpcs()).toHaveLength(0);
     } finally {
       release();
       await handle.completion;
@@ -976,6 +979,7 @@ describe("remote runner process supervision", () => {
     const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     const execute = vi.fn(async (input: { args?: string[] }) => {
       const label = input.args?.[2];
+      if (input.args?.[1] === REMOTE_RUNNER_PROCESS_PROBE_PREREQUISITE_SCRIPT) return ok;
       if (label === "paperclip-runner-launch") {
         nonce = input.args![4]!;
         enter(); await gate;
@@ -1474,7 +1478,7 @@ fs.readFileSync = function(path, ...args) {
         timeoutMs: 20_000,
       });
       expect(cleanup?.args?.[1]).toContain('test "$nonce" = "$expected_nonce"');
-      expect(cleanup?.args?.[1]).toContain('grep -Fqx -- "--runner-id"');
+      expect(cleanup?.args?.[1]).toContain('args.includes("--runner-id")');
       expect(cleanup?.args?.[1]).toContain('kill -TERM -- "$signal_target"');
       expect(cleanup?.args?.[1]).toContain('kill -KILL -- "$signal_target"');
       expect(cleanup?.args?.[1]).toContain('test -n "$fingerprint"');
