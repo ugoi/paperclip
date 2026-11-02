@@ -41,7 +41,9 @@ configuration was changed. Production reads used `GET` only.
   recovery prepared for approval; the branch adds an audited operator attestation
   endpoint, a stop-blocker view and a receipt for pre-adapter cancellations.
 - **CI:** GitHub Actions does not start any run in the fork since 2026-10-22; all
-  test results are local (Linux VM202 under heavy load, plus a clean macOS run).
+  test results are local (a clean macOS run plus Linux VM202). The Linux Runner
+  transport files were rerun on an idle VM202 on 2026-11-02: 342/348; the 6
+  remaining failures fail the same way on plain upstream `1a6017d64`.
 
 ## Commit-by-commit decisions
 
@@ -476,7 +478,7 @@ checked for its cause.
 | Server `native-session-executor.test.ts` | macOS + Linux | macOS **1025/1027** after `120268c9a`, `757382cf0`, `9a07785c4`, `3a3b41ba3`, `d589ff555`; the 2 macOS failures mock Linux `/proc`/`uname` and pass on Linux. Linux, all 55 remote-runner launcher/supervision cases plus the exit-receipt and HTTP-Stop-during-staging cases: **pass**. The upstream gateway health-outage case allows 5 s from launch to the first healthy probe; with the fork's two real prerequisite probes it missed that window twice under load, and passes (4.97 s) once the mock answers the probes (`d589ff555`) |
 | Runner: native-execution, codex security/context, provider launch, native-session-runtime | macOS | **pass** (367/369 in the first run; the 2 remaining launch-readiness cases needed the debug `paperclip-runnerd` and pass in the next row) |
 | Runner `runnerd-codex-transport.test.ts` + `runner-launch-readiness.test.ts` with a freshly built debug `paperclip-runnerd` | macOS | **330/330** |
-| Same Runner transport/readiness files + `codex-security-config.test.ts`, Linux debug `paperclip-runnerd` built with Rust 1.97.1 | Linux | **339/348 not confirmed**: first run 329/348 at load 80–120; a serial rerun of the 19 failures passed 10. The remaining 9 (cold-restore of a suspended session, real OpenCode proxy boundary ×3, event-backlog suspension, setup hello with late remote release, one launch-readiness case, Codex command resolution with `spawnSync … ETIMEDOUT`) fail with timeouts or a quiescence race. The same files pass 330/330 on macOS and the touched transport logic is platform-independent, so this is most likely host load — but it is **not verified on an idle Linux host**; run these before merging. |
+| Same Runner transport/readiness files + `codex-security-config.test.ts`, Linux debug `paperclip-runnerd` built with Rust 1.97.1 | Linux | **342/348, no regression from this branch.** Overnight at load 80–120: 329/348, 339/348 after a serial rerun of the failures. Rerun on 2026-11-02 from 05:57 CET on an idle VM202 (load 5–7, one peak at 19), default timeouts, same binary and head `5f60e22f7`: **342/348**. 3 of the 9 overnight failures now pass (event-backlog suspension, launch-readiness `resume`, Codex command resolution). The other 6 (setup hello `late-remote-release-error`, cold-restore of a suspended session with `pending tail: true` and `restart-before-bootstrap`, real OpenCode proxy boundary ×3) failed again in two serial reruns of just these cases; one cold-restore case passed once. All 6 **fail the same way on plain upstream `1a6017d64`** (separate worktree, upstream runner built with the same toolchain, one serial run): `registrationReleased` stays false, `runner did not durably suspend before checkpoint`, 30 s timeout at the OpenCode boundary. So they are an existing upstream problem on this Linux host, not caused by the fork commits. Their cause was not investigated further. The same files pass 330/330 on macOS. |
 | `adapter-utils` `ssh-tar-diagnostics` + `remote-managed-runtime` | Linux | **12/12**, three consecutive runs, no unhandled errors (macOS: 11/12, temp-dir realpath in the expected message) |
 | Hermes `execute.resume-args.test.ts` | Linux | **1/1** |
 | Kubernetes plugin unit tests (standalone install) | Linux | **214/216**; the 2 failures are upstream `file-sync.test.ts` 5 s timeouts (one streams > 100 MB); all fork-touched files pass |
@@ -507,8 +509,9 @@ native-runner acceptance (needs the deployed artifacts).
    after boot requires the database restore; an image-only downgrade is not safe.
 3. **No CI signal.** GitHub Actions does not start runs in the fork (since
    2026-10-22). Rust tests passed on macOS arm64 only (Linux Rust tests not run);
-   9 Linux Runner transport cases remain unconfirmed under VM202 load (they pass
-   on macOS); the full upstream suite has not run. The native Linux and Darwin
+   6 Linux Runner transport cases fail on VM202 even when it is idle; they fail
+   identically on plain upstream, so they are not a fork regression, but the
+   Linux lane is not green; the full upstream suite has not run. The native Linux and Darwin
    artifacts still have to be built and hash-verified.
 4. **Local test signal is partial.** Focused suites for every fork-touched area
    passed (see the table); unrelated upstream suites were not run, and VM202 timed
